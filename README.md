@@ -7,7 +7,7 @@
 | 模块 | 功能 |
 |------|------|
 | `roms_prepro/grid/` | ROMS 网格生成与质量控制 |
-| `roms_prepro/icbc/` | 初始场 (IC) 和边界场 (BC) — 支持 CMEMS/Mercator/HYCOM 数据源 |
+| `roms_prepro/icbc/` | 初始场 (IC) 和边界场 (BC) — 支持 ROMS/Mercator/HYCOM 数据源 |
 | `roms_prepro/forcing/` | ERA5 大气强迫场 (风、气压、辐射、降水、湿度) |
 | `roms_prepro/remapping/` | 潮汐强迫 (TPXO8) |
 | `roms_prepro/river/` | 河流输入 (月均流量) |
