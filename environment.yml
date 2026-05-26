@@ -1,0 +1,18 @@
+# roms_prepro environment
+# Create: conda env create -f environment.yml
+# Or:     conda create -n roms_prepro python=3.10 && pip install -r requirements.txt
+name: roms_prepro
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - numpy>=2.0
+      - scipy>=1.10
+      - netCDF4>=1.6
+      # optional but recommended:
+      - cftime          # for time reference handling
+      - cartopy          # for GSHHG coastline masking
+      - matplotlib       # for optional diagnostic plots

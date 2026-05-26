@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+.build/
+
+# NetCDF data files (large)
+*.nc
+*.nc.*
+
+# Environment
+.env
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Config
+opencode.json
