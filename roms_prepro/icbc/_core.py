@@ -162,7 +162,6 @@ def z_to_sigma(var_z, z_levels, sigma_depth, fill_value=np.nan):
         if valid.sum() < 2:
             continue
         z_v, v_v = z_lev[valid], col[valid]
-        # np.interp extrapolates beyond edges; we use constant fill
         result[:, c] = np.interp(s_flat[:, c], z_v, v_v,
                                   left=v_v[0], right=v_v[-1])
 

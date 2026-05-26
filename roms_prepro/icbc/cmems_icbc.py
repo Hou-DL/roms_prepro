@@ -12,6 +12,7 @@ import os, re
 import numpy as np
 import netCDF4 as nc4
 from datetime import datetime
+from tqdm import tqdm
 
 from ._core import (horizontal_interp, z_to_sigma,
                     rotate_uv, uv_to_cgrid, compute_ubar_vbar,
@@ -371,13 +372,13 @@ def mercator_to_roms_bry(roms_grid_file, source_files, bry_file,
     t = 0
     bry_time = np.zeros(total_steps)
 
+    pbar = tqdm(total=total_steps, desc='BC time steps', unit='step')
     for fp, idxs in filtered:
         src_t = _get_time(fp, tv)
         for idx in idxs:
             ti = src_t[idx] if src_t is not None else float(t)
             bry_sec = ti - ref_epoch if ref_epoch != 0 else ti
-            print(f"\n[{t + 1}/{total_steps}] {os.path.basename(fp)} "
-                  f"idx={idx}, time={ti:.0f}s since 1970")
+            pbar.set_postfix_str(f'{os.path.basename(fp)} idx={idx}')
 
             src = _read_source(fp, time_index=idx, time_var=tv,
                                lon_var=source_kwargs.get('lon_var'),
@@ -456,5 +457,7 @@ def mercator_to_roms_bry(roms_grid_file, source_files, bry_file,
                         ds.variables[f'{vn}_{EDGE_NAMES[b]}'][t] = edge_data[vn][b]
                 ds.close()
             t += 1
+            pbar.update(1)
 
-    print(f"\nWritten: {bry_file}  ({total_steps} time steps)")
+    pbar.close()
+    print(f"Written: {bry_file}  ({total_steps} time steps)")

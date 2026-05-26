@@ -2,6 +2,7 @@ import numpy as np
 import netCDF4 as nc
 from scipy.interpolate import RegularGridInterpolator
 from datetime import datetime
+from tqdm import tqdm
 
 
 def era5_to_roms_forcing(
@@ -59,7 +60,21 @@ def era5_to_roms_forcing(
         ds_rh0.close()
         rh_lon_2d, rh_lat_2d = np.meshgrid(rh_lon, rh_lat)
 
-    print('Interpolating ERA5 data to ROMS grid...')
+    # Count total data timesteps across all files for the progress bar
+    total_timesteps = 0
+    for ef in era5_files:
+        ds = nc.Dataset(ef)
+        et = ds.variables['time'][:]
+        if 'days since' in ds.variables['time'].units.lower():
+            fd = [datetime(1900, 1, 1) + np.timedelta64(int(t * 24), 'h') for t in et]
+        else:
+            fd = [datetime(1900, 1, 1) + np.timedelta64(int(t), 'h') for t in et]
+        ds.close()
+        sd_dt = datetime.fromisoformat(start_date.replace(' ', 'T')) if start_date else None
+        ed_dt = datetime.fromisoformat(end_date.replace(' ', 'T')) if end_date else None
+        total_timesteps += sum(1 for f in fd if (sd_dt is None or f >= sd_dt) and (ed_dt is None or f <= ed_dt))
+
+    pbar = tqdm(total=total_timesteps, desc='ERA5 timesteps', unit='step')
     for fi, (ef, rf) in enumerate(zip(era5_files, rh_files if rh_files else [None] * len(era5_files))):
         ds = nc.Dataset(ef)
         et = ds.variables['time'][:]
@@ -73,8 +88,6 @@ def era5_to_roms_forcing(
         ed_dt = datetime.fromisoformat(end_date.replace(' ', 'T')) if end_date else None
 
         for ti, dt in enumerate(file_dates):
-            ts = dt.strftime('%Y-%m-%d %H:%M')
-            print(f'  [{fi+1}/{len(era5_files)}] {ts}')
 
             if sd_dt is not None and dt < sd_dt:
                 continue
@@ -137,11 +150,13 @@ def era5_to_roms_forcing(
                 point_data['Vwind'] = _interp2d(era5_lon_2d, era5_lat_2d, v10, lon_rho, lat_rho)
 
             ds.close()
+            pbar.update(1)
 
             all_times.append(dt)
             for k in all_data:
                 all_data[k].append(point_data.get(k, None))
 
+    pbar.close()
     ntimes = len(all_times)
     if ntimes == 0:
         print('No data in date range.')

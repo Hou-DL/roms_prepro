@@ -25,3 +25,7 @@ Thumbs.db
 
 # Config
 opencode.json
+
+# Third-party / external
+pyroms-python3/
+.omo/

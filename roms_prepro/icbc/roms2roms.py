@@ -11,7 +11,7 @@ import netCDF4 as nc4
 from ._core import (horizontal_interp, sigma_to_z, z_to_sigma,
                     rotate_uv, uv_to_cgrid, compute_ubar_vbar,
                     write_ic_file, write_bry_file, EDGE_NAMES)
-from .mercator import _parse_date, _get_time, _match_idx, _filter_files
+from .cmems_icbc import _parse_date, _get_time, _match_idx, _filter_files
 
 DEFAULT_Z = np.array([
     -7500, -7000, -6500, -6000, -5500, -5000, -4500, -4000, -3500,

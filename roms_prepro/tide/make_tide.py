@@ -2,6 +2,7 @@ import numpy as np
 import netCDF4 as nc
 from datetime import datetime
 from scipy.interpolate import RegularGridInterpolator
+from tqdm import tqdm
 
 
 CONSTITUENTS = ['M2', 'S2', 'N2', 'K2', 'K1', 'O1', 'P1', 'Q1', 'M4']
@@ -60,8 +61,8 @@ def tpxo_to_roms_tide(roms_grid_file, tpxo_dir, out_file,
     uFac = _nodal_phase_correction(t, constituents)
     Vdeg = _equilibrium_phase(t0, constituents)
 
-    for ki, con in enumerate(constituents):
-        print(f'Processing {con}...')
+    pbar = tqdm(constituents, desc='Tidal constituents', unit='con')
+    for ki, con in enumerate(pbar):
 
         hf_file = f'{tpxo_dir}/hf.{con.lower()}_tpxo8_atlas_30c.nc'
         uv_file = f'{tpxo_dir}/uv.{con.lower()}_tpxo8_atlas_30c.nc'
