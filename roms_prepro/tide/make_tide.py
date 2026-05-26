@@ -5,7 +5,10 @@ from scipy.interpolate import RegularGridInterpolator
 from tqdm import tqdm
 
 
-CONSTITUENTS = ['M2', 'S2', 'N2', 'K2', 'K1', 'O1', 'P1', 'Q1', 'M4']
+# 8 standard TPXO constituents (M4 is a shallow-water override)
+DEFAULT_CONSTITUENTS = ['M2', 'S2', 'N2', 'K2', 'K1', 'O1', 'P1', 'Q1']
+# Full list including M4
+CONSTITUENTS = DEFAULT_CONSTITUENTS + ['M4']
 
 DOODSON = {
     'M2':  np.array([2, -2,  2,  0, 0, 0,   0, 28.9841042]),
@@ -23,7 +26,7 @@ DOODSON = {
 def tpxo_to_roms_tide(roms_grid_file, tpxo_dir, out_file,
                      constituents=None, ini_date=None):
     if constituents is None:
-        constituents = [c for c in CONSTITUENTS if c in DOODSON]
+        constituents = [c for c in DEFAULT_CONSTITUENTS if c in DOODSON]
 
     for c in constituents:
         if c not in DOODSON:
