@@ -15,12 +15,29 @@ Usage
     python main.py grid     # run only grid creation
     python main.py ic       # run only IC creation
     python main.py bc       # run only BC creation
+    python main.py forc     # run only ERA5 forcing
+    python main.py tide     # run only TPXO tidal forcing
+    python main.py river    # run only river forcing
+    python main.py remap    # run only sigma→z remapping
 
 Environment
 -----------
 Requires the ``roms_prepro`` conda environment::
 
     conda activate roms_prepro
+
+Module structure
+----------------
+::
+
+    roms_prepro/
+      grid/          — Grid creation (make_grid.py, bathymetry.py, vgrid.py, mask.py)
+      icbc/          — IC/BC from CMEMS/Mercator (cmems_icbc.py, roms2roms.py, _core.py)
+      forcing/       — ERA5 atmospheric forcing (era5.py)
+      tide/          — TPXO8 tidal forcing (make_tide.py)
+      river/         — River forcing (make_river.py)
+      remapping/     — sigma↔z coordinate interpolation (roms2z.py, sta2z.py)
+      utils/         — Utility functions
 """
 
 import os, sys
