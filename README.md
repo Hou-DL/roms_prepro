@@ -39,6 +39,24 @@
 
 ## 快速开始 / Quick Start
 
+### 环境配置 / Environment setup
+
+```bash
+# 从 environment.yml 创建 conda 环境 / Create conda environment
+conda env create -f environment.yml
+conda activate roms_prepro
+```
+
+或者手动 / Or manually:
+
+```bash
+conda create -n roms_prepro python=3.10
+conda activate roms_prepro
+pip install numpy scipy netCDF4 tqdm
+```
+
+### 代码示例 / Code example
+
 ```python
 from roms_prepro.grid import create_roms_grid
 from roms_prepro.icbc import mercator_to_roms_ini, mercator_to_roms_bry
