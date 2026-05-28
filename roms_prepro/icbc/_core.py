@@ -370,7 +370,11 @@ def extract_boundary(field_2d, field_3d_u, field_3d_v, boundaries):
 
 def _put_var(ds, name, data, dims, **attrs):
     """Create and write a variable to a NetCDF dataset."""
-    v = ds.createVariable(name, 'f8', dims)
+    fill = attrs.pop('_FillValue', None)
+    missing = attrs.pop('missing_value', None)
+    v = ds.createVariable(name, 'f8', dims, fill_value=fill if fill is not None else None)
+    if missing is not None:
+        setattr(v, 'missing_value', missing)
     for k, val in attrs.items():
         setattr(v, k, val)
     v[:] = data
@@ -412,6 +416,20 @@ def write_ic_file(filename, metrics, vgrid_params, ocean_time,
              long_name='latitude', units='degree_north',
              coordinates='lon_rho lat_rho', field='latitude, scalar')
     _put_var(ds, 'mask_rho', metrics['mask_rho'], ('eta_rho', 'xi_rho'))
+
+    # Staggered-grid coordinates (required by ROMS for coordinates attribute references)
+    if 'lon_u' in metrics:
+        _put_var(ds, 'lon_u', metrics['lon_u'], ('eta_u', 'xi_u'),
+                 long_name='longitude at u-points', units='degree_east')
+    if 'lat_u' in metrics:
+        _put_var(ds, 'lat_u', metrics['lat_u'], ('eta_u', 'xi_u'),
+                 long_name='latitude at u-points', units='degree_north')
+    if 'lon_v' in metrics:
+        _put_var(ds, 'lon_v', metrics['lon_v'], ('eta_v', 'xi_v'),
+                 long_name='longitude at v-points', units='degree_east')
+    if 'lat_v' in metrics:
+        _put_var(ds, 'lat_v', metrics['lat_v'], ('eta_v', 'xi_v'),
+                 long_name='latitude at v-points', units='degree_north')
 
     for key, value, long_name, units in [
         ('theta_s', vgrid_params.get('theta_s', 5.0),
@@ -500,24 +518,32 @@ def write_bry_file(filename, metrics, vgrid_params, boundaries,
 
     ny, nx = metrics['lon_rho'].shape
 
-    # Determine N from any 3D variable
+    # Determine N from any 3D variable (data is (ntime, N, ...))
     N = 1
     for v in ['temp', 'salt', 'u', 'v']:
         if v in bry_data:
             for arr in bry_data[v]:
-                if arr is not None and arr.ndim == 2:
-                    N = arr.shape[0]
+                if arr is not None and arr.ndim >= 2:
+                    N = arr.shape[1]
                     break
             if N > 1:
                 break
+
+    ntime = len(bry_time)
 
     # Global dimensions
     ds.createDimension('xi_rho', nx)
     ds.createDimension('eta_rho', ny)
     ds.createDimension('s_rho', N)
-    ds.createDimension('bry_time', None)
 
-    # Grid info
+    # ROMS expects per-variable time dimensions for boundary files.
+    # Use fixed size since we know ntime upfront.
+    # NETCDF3_64BIT only supports one unlimited dimension, so use fixed.
+    ds.createDimension('zeta_time', ntime)
+    ds.createDimension('v2d_time', ntime)
+    ds.createDimension('v3d_time', ntime)
+    ds.createDimension('temp_time', ntime)
+    ds.createDimension('salt_time', ntime)
     ds.createVariable('spherical', 'c')[:] = 'T'
     for key in ('Vtransform', 'Vstretching'):
         if key in vgrid_params:
@@ -557,12 +583,7 @@ def write_bry_file(filename, metrics, vgrid_params, boundaries,
         edge = EDGE_NAMES[b]
         is_ew = edge in ('west', 'east')
 
-        # Determine dimension names for this edge
         if is_ew:
-            # Along-eta edge: dimensions depend on variable position
-            # For rho vars (zeta, temp, salt): length = ny
-            # For u vars: length = ny (eta_u = eta_rho)
-            # For v vars: length = ny - 1 (eta_v = eta_rho - 1)
             rho_dim_name = f'eta_rho_{edge}'
             u_dim_name = f'eta_u_{edge}'
             v_dim_name = f'eta_v_{edge}'
@@ -570,7 +591,6 @@ def write_bry_file(filename, metrics, vgrid_params, boundaries,
             u_len = ny
             v_len = ny - 1
         else:
-            # Along-xi edge
             rho_dim_name = f'xi_rho_{edge}'
             u_dim_name = f'xi_u_{edge}'
             v_dim_name = f'xi_v_{edge}'
@@ -578,19 +598,28 @@ def write_bry_file(filename, metrics, vgrid_params, boundaries,
             u_len = nx - 1
             v_len = nx
 
-        # Create dimensions
         ds.createDimension(rho_dim_name, rho_len)
         if u_len != rho_len:
             ds.createDimension(u_dim_name, u_len)
         if v_len != rho_len:
             ds.createDimension(v_dim_name, v_len)
 
-    # Time
-    ds.createVariable('bry_time', 'f8', ('bry_time'))
-    ds.variables['bry_time'][:] = bry_time
-    ds.variables['bry_time'].units = 'seconds since 2000-01-01 00:00:00'
+    # Write time variables (per-variable convention used by ROMS)
+    def _write_time_var(tvar_name):
+        tvar = ds.createVariable(tvar_name, 'f8', (tvar_name,))
+        tvar[:] = bry_time
+        tvar.units = 'seconds since 2000-01-01 00:00:00'
+        tvar.long_name = tvar_name
+        tvar.field = f'{tvar_name}, scalar, series'
+        return tvar_name
 
-    # Write boundary variables
+    zeta_time_name = _write_time_var('zeta_time')
+    v2d_time_name = _write_time_var('v2d_time')
+    v3d_time_name = _write_time_var('v3d_time')
+    temp_time_name = _write_time_var('temp_time')
+    salt_time_name = _write_time_var('salt_time')
+
+    # Write boundary variables with time attribute pointing to proper time variable
     for b, active in enumerate(boundaries):
         if not active:
             continue
@@ -601,45 +630,43 @@ def write_bry_file(filename, metrics, vgrid_params, boundaries,
         u_dim_name = f'eta_u_{edge}' if is_ew else f'xi_u_{edge}'
         v_dim_name = f'eta_v_{edge}' if is_ew else f'xi_v_{edge}'
 
-        # Positional (zeta) and 3D tracers at rho
-        for var_name in ['zeta', 'temp', 'salt']:
-            if var_name not in bry_data or bry_data[var_name][b] is None:
-                continue
-            arr = np.asarray(bry_data[var_name][b])
-            if arr.ndim == 1:
-                dims = ('bry_time', rho_dim_name)
-            else:
-                dims = ('bry_time', 's_rho', rho_dim_name)
-            _put_var(ds, f'{var_name}_{edge}', arr[None, ...], dims,
-                     long_name=f'{var_name}, {edge} boundary')
+        if 'zeta' in bry_data and bry_data['zeta'][b] is not None:
+            _put_var(ds, f'zeta_{edge}', bry_data['zeta'][b],
+                     (zeta_time_name, rho_dim_name),
+                     long_name=f'zeta, {edge} boundary', time=zeta_time_name)
 
-        # u at U-points
+        if 'temp' in bry_data and bry_data['temp'][b] is not None:
+            _put_var(ds, f'temp_{edge}', bry_data['temp'][b],
+                     (temp_time_name, 's_rho', rho_dim_name),
+                     long_name=f'temp, {edge} boundary', time=temp_time_name)
+
+        if 'salt' in bry_data and bry_data['salt'][b] is not None:
+            _put_var(ds, f'salt_{edge}', bry_data['salt'][b],
+                     (salt_time_name, 's_rho', rho_dim_name),
+                     long_name=f'salt, {edge} boundary', time=salt_time_name)
+
         if 'u' in bry_data and bry_data['u'][b] is not None:
-            arr = np.asarray(bry_data['u'][b])
             dim_name = u_dim_name if u_dim_name in ds.dimensions else rho_dim_name
-            dims = ('bry_time', 's_rho', dim_name)
-            _put_var(ds, f'u_{edge}', arr[None, ...], dims,
-                     long_name=f'u-momentum, {edge} boundary')
+            _put_var(ds, f'u_{edge}', bry_data['u'][b],
+                     (v3d_time_name, 's_rho', dim_name),
+                     long_name=f'u-momentum, {edge} boundary', time=v3d_time_name)
 
-        # v at V-points
         if 'v' in bry_data and bry_data['v'][b] is not None:
-            arr = np.asarray(bry_data['v'][b])
             dim_name = v_dim_name if v_dim_name in ds.dimensions else rho_dim_name
-            dims = ('bry_time', 's_rho', dim_name)
-            _put_var(ds, f'v_{edge}', arr[None, ...], dims,
-                     long_name=f'v-momentum, {edge} boundary')
+            _put_var(ds, f'v_{edge}', bry_data['v'][b],
+                     (v3d_time_name, 's_rho', dim_name),
+                     long_name=f'v-momentum, {edge} boundary', time=v3d_time_name)
 
-        # ubar / vbar
-        for var_name in ['ubar', 'vbar']:
-            if var_name not in bry_data or bry_data[var_name][b] is None:
-                continue
-            arr = np.asarray(bry_data[var_name][b])
-            if var_name == 'ubar':
-                dim_name = u_dim_name if u_dim_name in ds.dimensions else rho_dim_name
-            else:
-                dim_name = v_dim_name if v_dim_name in ds.dimensions else rho_dim_name
-            _put_var(ds, f'{var_name}_{edge}', arr[None, ...],
-                     ('bry_time', dim_name),
-                     long_name=f'{var_name}, {edge} boundary')
+        if 'ubar' in bry_data and bry_data['ubar'][b] is not None:
+            dim_name = u_dim_name if u_dim_name in ds.dimensions else rho_dim_name
+            _put_var(ds, f'ubar_{edge}', bry_data['ubar'][b],
+                     (v2d_time_name, dim_name),
+                     long_name=f'ubar, {edge} boundary', time=v2d_time_name)
+
+        if 'vbar' in bry_data and bry_data['vbar'][b] is not None:
+            dim_name = v_dim_name if v_dim_name in ds.dimensions else rho_dim_name
+            _put_var(ds, f'vbar_{edge}', bry_data['vbar'][b],
+                     (v2d_time_name, dim_name),
+                     long_name=f'vbar, {edge} boundary', time=v2d_time_name)
 
     ds.close()

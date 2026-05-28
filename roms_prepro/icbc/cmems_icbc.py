@@ -73,24 +73,20 @@ def _fill_nan(arr):
     return out
 
 def _parse_date(t):
-    """Convert date string / datetime / numeric to seconds since 1970-01-01."""
+    """Convert date string / datetime / numeric to seconds since 1970-01-01 (UTC)."""
+    import calendar
     if t is None:
         return None
     if isinstance(t, (int, float, np.floating, np.integer)):
         return float(t)
     if isinstance(t, datetime):
-        return t.timestamp()
+        return calendar.timegm(t.timetuple()) + t.microsecond / 1e6
     if isinstance(t, str):
         for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S',
                     '%Y-%m-%d', '%Y%m%d', '%Y/%m/%d', '%d-%b-%Y']:
             try:
                 dt = datetime.strptime(t, fmt)
-                # On Windows, strptime may fail for pre-1970 dates;
-                # use manual calculation as fallback
-                try:
-                    return dt.timestamp()
-                except OSError:
-                    return (dt - datetime(1970, 1, 1)).total_seconds()
+                return calendar.timegm(dt.timetuple())
             except ValueError:
                 continue
     raise ValueError(f"Cannot parse date: {t}")
@@ -215,7 +211,8 @@ def _read_source(file_path,
 def _read_roms_grid(grid_file):
     g = nc4.Dataset(grid_file)
     m = {}
-    for v in ['h','lon_rho','lat_rho','mask_rho','mask_u','mask_v','angle']:
+    for v in ['h','lon_rho','lat_rho','mask_rho','mask_u','mask_v','angle',
+              'lon_u','lat_u','lon_v','lat_v']:
         if v in g.variables:
             m[v] = g.variables[v][:]
     ny, nx = m['lon_rho'].shape
@@ -275,6 +272,7 @@ def mercator_to_roms_ini(roms_grid_file, source_file, ini_file,
     zeta = horizontal_interp(src['lon_1d'], src['lat_1d'], src['zeta'],
                               metrics['lon_rho'], metrics['lat_rho'],
                               mask=mask, fill_value=0.0)
+    zeta = np.nan_to_num(zeta, nan=0.0)
     temp_h = horizontal_interp(src['lon_1d'], src['lat_1d'], src['temp'],
                                 metrics['lon_rho'], metrics['lat_rho'])
     salt_h = horizontal_interp(src['lon_1d'], src['lat_1d'], src['salt'],
@@ -367,10 +365,13 @@ def mercator_to_roms_bry(roms_grid_file, source_files, bry_file,
     m = re.search(r'since\s+(.+)', time_ref) if time_ref else None
     ref_epoch = _parse_date(m.group(1)) if m else 0.0
 
-    # Count total time steps
+    # Total time steps and pre-allocated storage
     total_steps = sum(len(idxs) for _, idxs in filtered)
-    t = 0
     bry_time = np.zeros(total_steps)
+
+    # Initialize storage for all edge data (detect shapes from first step)
+    all_edge_data = None
+    t = 0
 
     pbar = tqdm(total=total_steps, desc='BC time steps', unit='step')
     for fp, idxs in filtered:
@@ -401,7 +402,6 @@ def mercator_to_roms_bry(roms_grid_file, source_files, bry_file,
                                      metrics['lon_rho'], metrics['lat_rho'])
             v_h = horizontal_interp(src['lon_1d'], src['lat_1d'], src['v'],
                                       metrics['lon_rho'], metrics['lat_rho'])
-            # Fill NaN near coasts
             temp_h = _fill_nan(temp_h)
             salt_h = _fill_nan(salt_h)
             u_h = _fill_nan(u_h)
@@ -419,45 +419,125 @@ def mercator_to_roms_bry(roms_grid_file, source_files, bry_file,
                                            metrics.get('mask_u'),
                                            metrics.get('mask_v'))
 
-            # Extract edges
-            edge_data = {}
-            for name, data in [
-                    ('temp', temp_s), ('salt', salt_s),
-                    ('u', u_cg), ('v', v_cg),
-                    ('zeta', zeta), ('ubar', ubar), ('vbar', vbar)]:
-                edge_data[name] = [None] * 4
-                for b, active in enumerate(boundaries):
-                    if not active: continue
-                    edge = EDGE_NAMES[b]
-                    if edge in ('west', 'east'):
-                        ix = 0 if edge == 'west' else -1
-                        edge_data[name][b] = data[:, :, ix] if data.ndim == 3 else data[:, ix]
-                    else:
-                        ix = 0 if edge == 'south' else -1
-                        edge_data[name][b] = data[:, ix, :] if data.ndim == 3 else data[ix, :]
-
-            bry_time[t] = bry_sec
-
-            if t == 0:
-                # Compute S-coordinate parameters for the NC file
+            # Derive boundary u/v from rho-point velocities to avoid
+            # spval contamination from mask_u/mask_v on the grid edges.
+            # u/v at C-grid boundary positions are averages of adjacent rho-points:
+            #   west:  u = 0.5*(u_rho[:,:,0]+u_rho[:,:,1])
+            #   east:  u = 0.5*(u_rho[:,:,-2]+u_rho[:,:,-1])
+            #   south: v = 0.5*(v_rho[:,0,:]+v_rho[:,1,:])
+#   north: v = 0.5*(v_rho[:,-2,:]+v_rho[:,-1,:])
+            u_boundary = {}
+            v_boundary = {}
+            for b, active in enumerate(boundaries):
+                if not active:
+                    continue
+                edge = EDGE_NAMES[b]
+                if edge == 'west':
+                    u_boundary[b] = 0.5 * (u_rho[:, :, 0] + u_rho[:, :, 1])
+                    v_boundary[b] = 0.5 * (v_rho[:, :-1, 0] + v_rho[:, 1:, 0])
+                elif edge == 'east':
+                    u_boundary[b] = 0.5 * (u_rho[:, :, -2] + u_rho[:, :, -1])
+                    v_boundary[b] = 0.5 * (v_rho[:, :-1, -1] + v_rho[:, 1:, -1])
+                elif edge == 'south':
+                    u_boundary[b] = 0.5 * (u_rho[:, 0, :-1] + u_rho[:, 0, 1:])
+                    v_boundary[b] = 0.5 * (v_rho[:, 0, :] + v_rho[:, 1, :])
+                elif edge == 'north':
+                    u_boundary[b] = 0.5 * (u_rho[:, -1, :-1] + u_rho[:, -1, 1:])
+                    v_boundary[b] = 0.5 * (v_rho[:, -2, :] + v_rho[:, -1, :])
+            # Extract edges and store in pre-allocated arrays
+            if all_edge_data is None:
                 from ..grid import stretching
                 s_rho, Cs_r = stretching(Vstretching, theta_s, theta_b, N, kgrid=0)
                 vp = {'Vtransform': Vtransform, 'Vstretching': Vstretching,
                       'theta_s': theta_s, 'theta_b': theta_b,
                       'Tcline': Tcline, 'hc': Tcline,
                       's_rho': s_rho, 'Cs_r': Cs_r}
-                write_bry_file(bry_file, metrics, vp, boundaries,
-                               edge_data, bry_time[:t + 1])
-            else:
-                ds = nc4.Dataset(bry_file, 'a')
-                ds.variables['bry_time'][t] = bry_time[t]
-                for vn in edge_data:
-                    for b, active in enumerate(boundaries):
-                        if not active or edge_data[vn][b] is None: continue
-                        ds.variables[f'{vn}_{EDGE_NAMES[b]}'][t] = edge_data[vn][b]
-                ds.close()
+                all_edge_data = _init_bry_storage(total_steps, boundaries, N, metrics, zeta, temp_s)
+
+            for vn, data in [('zeta', zeta), ('temp', temp_s), ('salt', salt_s),
+                              ('u', u_cg), ('v', v_cg),
+                              ('ubar', ubar), ('vbar', vbar)]:
+                for b, active in enumerate(boundaries):
+                    if not active:
+                        continue
+                    edge = EDGE_NAMES[b]
+                    # Use special boundary u/v (derived from rho-points) when
+                    # the C-grid mask zeroes out the edge (land boundary ring).
+                    if vn == 'u' and b in u_boundary:
+                        all_edge_data[vn][b][t] = u_boundary[b]
+                    elif vn == 'v' and b in v_boundary:
+                        all_edge_data[vn][b][t] = v_boundary[b]
+                    elif vn == 'ubar' and b in u_boundary:
+                        uk = u_boundary[b]
+                        hw = np.abs(z_w[1:] - z_w[:-1])  # (N, eta_rho, xi_rho)
+                        # Average hw to u-points, then slice to boundary edge
+                        hw_u = 0.5 * (hw[:, :, :-1] + hw[:, :, 1:])  # (N, eta_rho, xi_u)
+                        if EDGE_NAMES[b] in ('west', 'east'):
+                            ix = 0 if EDGE_NAMES[b] == 'west' else -1
+                            hw_ue = hw_u[:, :, ix]  # (N, eta_rho)
+                        else:
+                            ix = 0 if EDGE_NAMES[b] == 'south' else -1
+                            hw_ue = hw_u[:, ix, :]  # (N, xi_u)
+                        all_edge_data[vn][b][t] = np.sum(uk * hw_ue, axis=0) / (np.sum(hw_ue, axis=0) + 1e-30)
+                    elif vn == 'vbar' and b in v_boundary:
+                        vk = v_boundary[b]
+                        hw = np.abs(z_w[1:] - z_w[:-1])  # (N, eta_rho, xi_rho)
+                        hw_v = 0.5 * (hw[:, :-1, :] + hw[:, 1:, :])  # (N, eta_v, xi_rho)
+                        if EDGE_NAMES[b] in ('west', 'east'):
+                            ix = 0 if EDGE_NAMES[b] == 'west' else -1
+                            hw_ve = hw_v[:, :, ix]  # (N, eta_v)
+                        else:
+                            ix = 0 if EDGE_NAMES[b] == 'south' else -1
+                            hw_ve = hw_v[:, ix, :]  # (N, xi_rho)
+                        all_edge_data[vn][b][t] = np.sum(vk * hw_ve, axis=0) / (np.sum(hw_ve, axis=0) + 1e-30)
+                    elif edge in ('west', 'east'):
+                        ix = 0 if edge == 'west' else -1
+                        all_edge_data[vn][b][t] = data[:, :, ix] if data.ndim >= 3 else data[:, ix]
+                    else:
+                        ix = 0 if edge == 'south' else -1
+                        all_edge_data[vn][b][t] = data[:, ix, :] if data.ndim >= 3 else data[ix, :]
+
+            bry_time[t] = bry_sec
             t += 1
             pbar.update(1)
 
     pbar.close()
+
+    # Write full file at once
+    write_bry_file(bry_file, metrics, vp, boundaries,
+                   all_edge_data, bry_time)
     print(f"Written: {bry_file}  ({total_steps} time steps)")
+
+
+def _init_bry_storage(total_steps, boundaries, N, metrics, zeta_sample, temp_sample):
+    """Pre-allocate storage arrays for boundary edge data."""
+    ny, nx = metrics['lon_rho'].shape
+    edge_data = {}
+    for vn in ['zeta', 'temp', 'salt', 'u', 'v', 'ubar', 'vbar']:
+        edge_data[vn] = [None] * 4
+        for b, active in enumerate(boundaries):
+            if not active:
+                continue
+            edge = ['west', 'east', 'south', 'north'][b]
+            if edge in ('west', 'east'):
+                rho_len = ny
+                u_len = ny
+                v_len = ny - 1
+            else:
+                rho_len = nx
+                u_len = nx - 1
+                v_len = nx
+
+            if vn == 'zeta':
+                edge_data[vn][b] = np.zeros((total_steps, rho_len))
+            elif vn == 'temp' or vn == 'salt':
+                edge_data[vn][b] = np.zeros((total_steps, N, rho_len))
+            elif vn == 'u':
+                edge_data[vn][b] = np.zeros((total_steps, N, u_len))
+            elif vn == 'v':
+                edge_data[vn][b] = np.zeros((total_steps, N, v_len))
+            elif vn == 'ubar':
+                edge_data[vn][b] = np.zeros((total_steps, u_len))
+            elif vn == 'vbar':
+                edge_data[vn][b] = np.zeros((total_steps, v_len))
+    return edge_data

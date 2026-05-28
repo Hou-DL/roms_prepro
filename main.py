@@ -324,11 +324,19 @@ def make_forcing_era5(grid_file=None):
       u10, v10, t2m, msl, msdwlwrf, msnswrf, tp, d2m
     Relative humidity can come from a separate RH_*.nc file or be
     computed from d2m and t2m.
+
+    Two modes (set interp_to_grid=):
+      False (default) — keep ERA5 original 1D lat/lon grid, ROMS
+                        interpolates internally. Grid file NOT needed.
+      True            — bilinear interpolation to ROMS curvilinear grid.
+                        Requires grid_file with lon_rho/lat_rho.
     """
     from roms_prepro.forcing import era5_to_roms_forcing
     from glob import glob
 
     # ---------- edit these parameters ----------
+    interp_to_grid = False   # False = raw ERA5 grid, True = interpolate to ROMS
+
     if grid_file is None:
         grid_file = 'my_grid.nc'
 
@@ -349,7 +357,7 @@ def make_forcing_era5(grid_file=None):
     print(f"Found {len(era5_files)} ERA5 files")
 
     era5_to_roms_forcing(
-        roms_grid_file=grid_file,
+        roms_grid_file=grid_file if interp_to_grid else None,
         era5_files=era5_files,
         rh_files=rh_files,
         out_file=forc_file,
@@ -361,6 +369,7 @@ def make_forcing_era5(grid_file=None):
         get_Pair=True,
         get_Qair=True,
         get_Wind=True,
+        interp_to_grid=interp_to_grid,
     )
 
 
