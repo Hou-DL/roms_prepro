@@ -32,7 +32,8 @@ Module structure
 
     roms_prepro/
       grid/          — Grid creation (make_grid.py, bathymetry.py, vgrid.py, mask.py)
-      icbc/          — IC/BC from CMEMS/Mercator (cmems_icbc.py, roms2roms.py, _core.py)
+      ic/            — Initial conditions (cmems_ic.py, roms2roms_ic.py, _core.py)
+      bc/            — Boundary conditions (cmems_bc.py, roms2roms_bc.py, _core.py)
       forcing/       — ERA5 atmospheric forcing (era5.py)
       tide/          — TPXO8 tidal forcing (make_tide.py)
       river/         — River forcing (make_river.py)
@@ -139,26 +140,20 @@ def make_grid():
 # ===========================================================================
 
 def make_ic_mercator(grid_file=None):
-    """
-    Create ROMS initial conditions from a Mercator/HYCOM/CMEMS source file.
+    """Create ROMS IC from a single Mercator/HYCOM/CMEMS file."""
+    from roms_prepro.ic import mercator_to_roms_ini
 
-    Auto-detects variable names in the source.  Override with keyword args
-    like ``temp_var='thetao'`` if needed.
-    """
-    from roms_prepro.icbc import mercator_to_roms_ini
+    if grid_file is None:
+        grid_file = 'my_grid.nc'
+    source_file = 'cmems_glo_phy_20220823.nc'
+    ini_file = 'my_ini.nc'
 
     # ---------- edit these parameters ----------
-    if grid_file is None:
-        grid_file = 'my_grid.nc'          # ROMS grid file
-    source_file = 'hycom_2020_001.nc'     # Mercator/HYCOM file
-    ini_file = 'my_ini.nc'                # output IC file
-
     Vtransform, Vstretching = 2, 4
     theta_s, theta_b, Tcline = 7.0, 0.1, 20.0
-    N = 30                                # vertical levels
-
-    init_date = '2020-01-15'              # IC date (set to None for first step)
-    time_ref = 'seconds since 2000-01-01 00:00:00'
+    N = 30
+    init_date = '2025-01-01'
+    time_ref = 'seconds since 2025-01-01 00:00:00'
     # -------------------------------------------
 
     mercator_to_roms_ini(
@@ -168,8 +163,45 @@ def make_ic_mercator(grid_file=None):
         Vtransform=Vtransform, Vstretching=Vstretching,
         theta_s=theta_s, theta_b=theta_b, Tcline=Tcline, N=N,
         init_date=init_date, time_ref=time_ref,
-        # Override auto-detected names if needed:
-        # temp_var='thetao', salt_var='so', u_var='uo', v_var='vo',
+    )
+
+
+def make_ic_cmems(grid_file=None):
+    """Create ROMS IC from CMEMS files (auto-detect or specify files)."""
+    from roms_prepro.ic import cmems_to_roms_ini
+
+    if grid_file is None:
+        grid_file = 'my_grid.nc'
+    ini_file = 'my_ini_cmems.nc'
+
+    # ---------- edit these parameters ----------
+    # 方式1: 指定目录自动搜索
+    data_dir = '/data/hdl/oceanfiles/CMEMS/'
+
+    # 方式2: 指定各变量文件路径（取消注释使用）
+    # zeta_file = data_dir + 'zos_20250101.nc'
+    # temp_file = data_dir + 'thetao_20250101.nc'
+    # salt_file = data_dir + 'so_20250101.nc'
+    # u_file = data_dir + 'uo_20250101.nc'
+    # v_file = data_dir + 'vo_20250101.nc'
+
+    Vtransform, Vstretching = 2, 3
+    theta_s, theta_b, Tcline = 2.5, 1.0, 25.0
+    N = 30
+    time_ref = '1990-01-01'
+    init_date = '2025-05-01'
+    time_index = 0
+    # -------------------------------------------
+
+    cmems_to_roms_ini(
+        roms_grid_file=grid_file,
+        ini_file=ini_file,
+        data_dir=data_dir,
+        # zeta_file=zeta_file, temp_file=temp_file, salt_file=salt_file,
+        # u_file=u_file, v_file=v_file,
+        Vtransform=Vtransform, Vstretching=Vstretching,
+        theta_s=theta_s, theta_b=theta_b, Tcline=Tcline, N=N,
+        time_ref=time_ref, init_date=init_date, time_index=time_index,
     )
 
 
@@ -177,48 +209,34 @@ def make_ic_mercator(grid_file=None):
 # 3.  Boundary conditions (Mercator/HYCOM/CMEMS → ROMS)
 # ===========================================================================
 
-def make_bry_mercator(grid_file=None):
-    """
-    Create ROMS time-dependent boundary conditions from Mercator/HYCOM files.
+def make_bry_cmems(grid_file=None):
+    """Create ROMS boundary conditions from CMEMS monthly files."""
+    from roms_prepro.bc.d_obc_cmems import main as cmems_bry_main
+    import roms_prepro.bc.d_obc_cmems as cfg
 
-    The source_files list will be filtered by start_date/end_date if given.
-    """
-    from roms_prepro.icbc import mercator_to_roms_bry
-    from glob import glob
-
-    # ---------- edit these parameters ----------
     if grid_file is None:
         grid_file = 'my_grid.nc'
-    source_dir = './hycom_data/'          # directory with source files
-    source_pattern = '*.nc'               # glob pattern for source files
-    bry_file = 'my_bry.nc'                # output BC file
 
-    Vtransform, Vstretching = 2, 4
-    theta_s, theta_b, Tcline = 7.0, 0.1, 20.0
-    N = 30
-    boundaries = (True, True, True, True)  # [W, E, S, N]
+    # ---------- edit these parameters ----------
+    cfg.DATA_DIR = '/data/hdl/oceanfiles/CMEMS/2025'
+    cfg.GRD_NAME = grid_file
+    cfg.BRY_NAME = 'my_bry_cmems.nc'
 
-    start_date = '2020-01-01'             # filter time range
-    end_date = '2020-01-31'
-    time_ref = 'seconds since 2000-01-01 00:00:00'
+    cfg.BOUNDARY = [0, 1, 1, 0]  # [W, E, S, N]
+
+    cfg.N_LEVELS = 30
+    cfg.VTRANSFORM = 2
+    cfg.VSTRETCHING = 3
+    cfg.THETA_S = 2.5
+    cfg.THETA_B = 1.0
+    cfg.TCLINE = 25.0
+
+    cfg.TIME_START = '2025-05-01 00:00:00'
+    cfg.TIME_END = '2025-09-30 23:00:00'
+    cfg.ROMS_TIME_REF = '1990-01-01 00:00:00'
     # -------------------------------------------
 
-    import glob as g
-    source_files = sorted(g.glob(os.path.join(source_dir, source_pattern)))
-    if not source_files:
-        print(f"WARNING: no source files found in {source_dir}")
-        return
-    print(f"Found {len(source_files)} source files")
-
-    mercator_to_roms_bry(
-        roms_grid_file=grid_file,
-        source_files=source_files,
-        bry_file=bry_file,
-        Vtransform=Vtransform, Vstretching=Vstretching,
-        theta_s=theta_s, theta_b=theta_b, Tcline=Tcline, N=N,
-        boundaries=boundaries,
-        start_date=start_date, end_date=end_date, time_ref=time_ref,
-    )
+    cmems_bry_main()
 
 
 # ===========================================================================
@@ -232,34 +250,37 @@ def make_ic_roms2roms(dst_grid_file=None):
     Uses intermediate standard-z levels for conservative vertical remapping.
     Automatically handles grid rotation angles.
     """
-    from roms_prepro.icbc import roms_to_roms_ini
+    from roms_prepro.ic import roms_to_roms_ini
 
     # ---------- edit these parameters ----------
     if dst_grid_file is None:
         dst_grid_file = 'my_grid.nc'
     src_grid_file = 'parent_grid.nc'      # source ROMS grid
-    src_hist_file = 'parent_hist.nc'      # source ROMS history file
+
+    # 方式1: 指定单个文件
+    # src_hist_file = 'parent_hist.nc'
+
+    # 方式2: 指定目录自动搜索
+    src_hist_dir = './parent_output/'
 
     ini_file = 'my_ini_from_parent.nc'
     Vtransform, Vstretching = 2, 4
     theta_s, theta_b, Tcline = 7.0, 0.1, 20.0
     N = 30
-    src_time = 0                          # time index in source file
 
-    init_date = None                      # or '2020-01-15' to auto-match
-    time_ref = None                       # or 'seconds since 2000-01-01 00:00:00'
+    init_date = '2020-01-15'              # 指定制作哪一天的 IC
+    # time_ref = None                     # 自动从源文件 ocean_time 单位读取
     # -------------------------------------------
 
     roms_to_roms_ini(
         src_grid_file=src_grid_file,
-        src_hist_file=src_hist_file,
         dst_grid_file=dst_grid_file,
         ini_file=ini_file,
+        src_hist_dir=src_hist_dir,
+        # src_hist_file=src_hist_file,
         Vtransform=Vtransform, Vstretching=Vstretching,
         theta_s=theta_s, theta_b=theta_b, Tcline=Tcline, N=N,
-        src_time=src_time, init_date=init_date, time_ref=time_ref,
-        # Override variable names in source if needed:
-        # var_mapping={'temp': 'temp_sur', 'u': 'u_eastward'},
+        init_date=init_date,
     )
 
 
@@ -271,15 +292,19 @@ def make_bry_roms2roms(dst_grid_file=None):
     """
     Create ROMS time-dependent BC by remapping from another ROMS run.
     """
-    from roms_prepro.icbc import roms_to_roms_bry
+    from roms_prepro.bc import roms_to_roms_bry
     from glob import glob
 
     # ---------- edit these parameters ----------
     if dst_grid_file is None:
         dst_grid_file = 'my_grid.nc'
     src_grid_file = 'parent_grid.nc'
-    src_hist_dir = './parent_output/'     # directory with source history files
-    src_hist_pattern = 'ocean_avg_*.nc'   # glob pattern
+
+    # 方式1: 指定文件列表
+    # src_hist_files = ['ocean_avg_001.nc', 'ocean_avg_002.nc']
+
+    # 方式2: 指定目录自动搜索
+    src_hist_dir = './parent_output/'
 
     bry_file = 'my_bry_from_parent.nc'
     Vtransform, Vstretching = 2, 4
@@ -289,26 +314,19 @@ def make_bry_roms2roms(dst_grid_file=None):
 
     start_date = '2020-01-01'
     end_date = '2020-01-31'
-    time_ref = 'seconds since 2000-01-01 00:00:00'
+    # time_ref = None  # 自动从源文件 ocean_time 单位读取
     # -------------------------------------------
-
-    import glob as g
-    src_hist_files = sorted(g.glob(os.path.join(src_hist_dir,
-                                                src_hist_pattern)))
-    if not src_hist_files:
-        print(f"WARNING: no history files found in {src_hist_dir}")
-        return
-    print(f"Found {len(src_hist_files)} source history files")
 
     roms_to_roms_bry(
         src_grid_file=src_grid_file,
-        src_hist_files=src_hist_files,
         dst_grid_file=dst_grid_file,
         bry_file=bry_file,
+        src_hist_dir=src_hist_dir,
+        # src_hist_files=src_hist_files,
         Vtransform=Vtransform, Vstretching=Vstretching,
         theta_s=theta_s, theta_b=theta_b, Tcline=Tcline, N=N,
         boundaries=boundaries,
-        start_date=start_date, end_date=end_date, time_ref=time_ref,
+        start_date=start_date, end_date=end_date,
     )
 
 
@@ -374,6 +392,45 @@ def make_forcing_era5(grid_file=None):
 
 
 # ===========================================================================
+# 7.  ERA5 → ROMS Forcing (new version, GRIB+NC support)
+# ===========================================================================
+
+def make_forcing_era5_roms(grid_file=None):
+    """
+    ERA5 → ROMS Forcing using ERA5toROMS converter.
+
+    Supports GRIB and NC files, auto-detects time range,
+    splits wind and forcing into separate output files.
+    """
+    from roms_prepro.forcing.era5_to_roms import ERA5toROMS
+
+    # ---------- edit these parameters ----------
+    era5_dir = '/data/hdl/oceanfiles/era5/in/'
+    out_dir = './forcing_output'
+
+    # variables to process (see ERA5toROMS ROMS_VARINFO for full list)
+    variables = ['t2m', 'd2m', 'msl', 'tp', 'msdrswrf', 'msnlwrf', 'msdwlwrf', 'u10', 'v10']
+
+    time_start = None     # e.g. '2025-01-01 00:00:00'
+    time_end = None       # e.g. '2025-02-20 23:00:00'
+    base_date = '2025-01-01 00:00:00'
+    rotate_wind = False   # True = rotate to ROMS curvilinear grid
+    # -------------------------------------------
+
+    converter = ERA5toROMS(
+        in_dir=era5_dir,
+        out_dir=out_dir,
+        time_start=time_start,
+        time_end=time_end,
+        base_date=base_date,
+        grid_file=grid_file if rotate_wind else None,
+        variables=variables,
+        rotate_wind=rotate_wind,
+    )
+    converter.process()
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 
@@ -385,11 +442,12 @@ def main():
     # ----- enable / disable steps -----
     steps = [
         # 'grid',              # 1. create ROMS grid
-        # 'ic_mercator',       # 2. IC from mercator/HYCOM
-        # 'bry_mercator',      # 3. BC from mercator/HYCOM
-        # 'ic_roms2roms',      # 4. IC via ROMS → ROMS remapping
-        # 'bry_roms2roms',     # 5. BC via ROMS → ROMS remapping
-        # 'forcing_era5',      # 6. ERA5 atmospheric forcing
+        # 'ic_mercator',       # 2. IC from single Mercator/HYCOM file
+        # 'ic_cmems',          # 3. IC from separate CMEMS files
+        # 'bry_cmems',         # 4. BC from CMEMS monthly files
+        # 'ic_roms2roms',      # 5. IC via ROMS → ROMS remapping
+        # 'bry_roms2roms',     # 6. BC via ROMS → ROMS remapping
+        # 'forcing_era5',      # 7. ERA5 atmospheric forcing
     ]
     # -----------------------------------
 
@@ -409,8 +467,11 @@ def main():
         elif step == 'ic_mercator':
             make_ic_mercator(grid_file)
 
-        elif step == 'bry_mercator':
-            make_bry_mercator(grid_file)
+        elif step == 'ic_cmems':
+            make_ic_cmems(grid_file)
+
+        elif step == 'bry_cmems':
+            make_bry_cmems(grid_file)
 
         elif step == 'ic_roms2roms':
             make_ic_roms2roms(grid_file)
@@ -421,9 +482,12 @@ def main():
         elif step == 'forcing_era5':
             make_forcing_era5(grid_file)
 
+        elif step == 'forcing_era5_roms':
+            make_forcing_era5_roms(grid_file)
+
         else:
             print(f"Unknown step: {step}")
-            print("Available: grid, ic_mercator, bry_mercator, "
+            print("Available: grid, ic_mercator, ic_cmems, bry_cmems, "
                   "ic_roms2roms, bry_roms2roms, forcing_era5")
 
 

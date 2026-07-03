@@ -10,6 +10,9 @@ dist/
 *.nc
 *.nc.*
 
+# MATLAB
+*.m
+
 # Environment
 .env
 .venv/

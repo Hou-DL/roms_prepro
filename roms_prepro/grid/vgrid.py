@@ -8,6 +8,7 @@ References
 ----------
 - Song and Haidvogel (1994) — Vtransform=1, Vstretching=1
 - Shchepetkin (2005 / UCLA-ROMS) — Vstretching=2
+- Geyer (2009) — Vstretching=3 (BBL refinement)
 - Shchepetkin (2010 / UCLA-ROMS) — Vstretching=4
 - Powell (2008) — Vstretching=5 (surface-focused)
 """
@@ -55,6 +56,19 @@ def _Cs_2(s, theta_s, theta_b):
     return s.copy()
 
 
+def _Cs_3(s, theta_s, theta_b):
+    """Vstretching=3 – Geyer BBL (2009)."""
+    if theta_s > 0:
+        exp_s = theta_s      # surface stretching exponent
+        exp_b = theta_b      # bottom stretching exponent
+        alpha = 3.0          # scale factor for all hyperbolic functions
+        Cbot = np.log(np.cosh(alpha * (s + 1.0) ** exp_b)) / np.log(np.cosh(alpha)) - 1.0
+        Csur = -np.log(np.cosh(alpha * np.abs(s) ** exp_s)) / np.log(np.cosh(alpha))
+        weight = (1.0 - np.tanh(alpha * (s + 0.5))) / 2.0
+        return weight * Cbot + (1.0 - weight) * Csur
+    return s.copy()
+
+
 def _Cs_4(s, theta_s, theta_b):
     """Vstretching=4 – Shchepetkin (2010)."""
     if theta_s > 0:
@@ -78,7 +92,7 @@ def _Cs_5(s, theta_s, theta_b):
     return Csur
 
 
-_STRETCHING = {1: _Cs_1, 2: _Cs_2, 4: _Cs_4, 5: _Cs_5}
+_STRETCHING = {1: _Cs_1, 2: _Cs_2, 3: _Cs_3, 4: _Cs_4, 5: _Cs_5}
 
 
 def stretching(Vstretching, theta_s, theta_b, N, kgrid=0):
@@ -88,7 +102,12 @@ def stretching(Vstretching, theta_s, theta_b, N, kgrid=0):
     Parameters
     ----------
     Vstretching : int
-        Vertical stretching function (1, 2, 4, or 5).
+        Vertical stretching function (1, 2, 3, 4, or 5).
+        - 1: Song & Haidvogel (1994)
+        - 2: Shchepetkin (2005)
+        - 3: Geyer BBL (2009)
+        - 4: Shchepetkin (2010)
+        - 5: Powell / surface-focused
     theta_s : float
         Surface control parameter.
     theta_b : float

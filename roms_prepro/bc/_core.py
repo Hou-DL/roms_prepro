@@ -1,5 +1,5 @@
 """
-Core interpolation routines for ROMS initial/boundary conditions.
+Core interpolation routines and BC file writer for ROMS boundary conditions.
 
 Provides:
 - horizontal_interp: source lon/lat → target lon/lat (2D and 3D)
@@ -7,25 +7,25 @@ Provides:
 - sigma_to_z: ROMS sigma → standard z-levels
 - rotate_uv: rotate u,v from source angle to target angle
 - uv_to_cgrid: average rotated vectors to ROMS C-grid positions
+- compute_ubar_vbar: compute barotropic velocity
 - extract_boundary: extract N/S/E/W edges from full fields
 - write_bry_file: write standard ROMS BC NetCDF
-- write_ic_file: write standard ROMS IC NetCDF
 """
 
+import re
 import numpy as np
 from datetime import datetime
 import netCDF4 as nc4
 from scipy.interpolate import LinearNDInterpolator, RegularGridInterpolator
 from scipy.spatial import cKDTree
 
+
 # ---------------------------------------------------------------------------
 # Horizontal interpolation
 # ---------------------------------------------------------------------------
 
 def _interp_2d(src_lon, src_lat, src_var, dst_lon, dst_lat, mask=None):
-    """
-    Interpolate a 2-D field from source to destination grid.
-    """
+    """Interpolate a 2-D field from source to destination grid."""
     src_lon = np.asarray(src_lon, dtype=float).ravel()
     src_lat = np.asarray(src_lat, dtype=float).ravel()
     src_var = np.asarray(src_var, dtype=float).ravel()
@@ -116,41 +116,22 @@ def horizontal_interp(src_lon, src_lat, src_var, dst_lon, dst_lat,
         return result
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # Vertical interpolation
 # ---------------------------------------------------------------------------
 
 def z_to_sigma(var_z, z_levels, sigma_depth, fill_value=np.nan):
-    """
-    Interpolate from standard z-levels to ROMS sigma coordinates
-    (vectorised over spatial dimensions).
-
-    Parameters
-    ----------
-    var_z : ndarray (nz, eta, xi)
-    z_levels : ndarray (nz,) — monotonic depth array (negative downward)
-    sigma_depth : ndarray (ns, eta, xi)
-    fill_value : float
-
-    Returns
-    -------
-    var_sigma : ndarray (ns, eta, xi)
-    """
+    """Interpolate from standard z-levels to ROMS sigma coordinates."""
     var_z = np.asarray(var_z, dtype=float)
     z_lev = np.asarray(z_levels, dtype=float).ravel()
     s_dep = np.asarray(sigma_depth, dtype=float)
     ns, eta, xi = s_dep.shape
     nz = len(z_lev)
 
-    # Ensure z_lev is increasing (shallow → deep)
     if z_lev[0] > z_lev[-1]:
         z_lev = z_lev[::-1]
         var_z = var_z[::-1]
 
-    # Flatten spatial dims: (nz, eta*xi)
     var_flat = var_z.reshape(nz, -1)
     s_flat = s_dep.reshape(ns, -1)
     result = np.full_like(s_flat, fill_value)
@@ -169,23 +150,7 @@ def z_to_sigma(var_z, z_levels, sigma_depth, fill_value=np.nan):
 
 
 def sigma_to_z(var_sigma, sigma_depth, z_levels, fill_value=np.nan):
-    """
-    Interpolate from ROMS sigma coordinates to standard z-levels.
-
-    Parameters
-    ----------
-    var_sigma : ndarray (ns, eta, xi)
-        Data on sigma levels.
-    sigma_depth : ndarray (ns, eta, xi)
-        Sigma-level depths.
-    z_levels : ndarray (nz,)
-        Target z-levels (negative downward).
-    fill_value : float
-
-    Returns
-    -------
-    var_z : ndarray (nz, eta, xi)
-    """
+    """Interpolate from ROMS sigma coordinates to standard z-levels."""
     ns, eta, xi = var_sigma.shape
     nz = len(z_levels)
     result = np.full((nz, eta, xi), fill_value, dtype=float)
@@ -213,11 +178,7 @@ def sigma_to_z(var_sigma, sigma_depth, z_levels, fill_value=np.nan):
 # ---------------------------------------------------------------------------
 
 def rotate_uv(u, v, src_angle, dst_angle):
-    """
-    Rotate u,v from source grid to target grid.
-
-    Default src_angle=0 means source is eastward/northward (ERA5 convention).
-    """
+    """Rotate u,v from source grid to target grid."""
     if src_angle is None:
         src_angle = 0.0
     if dst_angle is None:
@@ -233,22 +194,7 @@ def rotate_uv(u, v, src_angle, dst_angle):
 
 
 def uv_to_cgrid(u_rho, v_rho, mask_u=None, mask_v=None, spval=1e37):
-    """
-    Average velocity from RHO-points to U/V staggered C-grid positions.
-
-    Parameters
-    ----------
-    u_rho, v_rho : ndarray (..., eta_rho, xi_rho)
-        Velocity components at RHO-points.
-    mask_u, mask_v : ndarray or None
-    spval : float
-        Fill value for land cells.
-
-    Returns
-    -------
-    u, v : ndarray
-        (..., eta_u, xi_u) and (..., eta_v, xi_v)
-    """
+    """Average velocity from RHO-points to U/V staggered C-grid positions."""
     shape_u = u_rho.shape[:-2] + (u_rho.shape[-2], u_rho.shape[-1] - 1)
     shape_v = v_rho.shape[:-2] + (v_rho.shape[-2] - 1, v_rho.shape[-1])
 
@@ -266,21 +212,7 @@ def uv_to_cgrid(u_rho, v_rho, mask_u=None, mask_v=None, spval=1e37):
 
 
 def compute_ubar_vbar(u, v, z_w, mask_u=None, mask_v=None):
-    """
-    Compute barotropic velocity by vertically integrating 3-D u/v.
-
-    Parameters
-    ----------
-    u, v : ndarray (N, eta_u, xi_u) / (N, eta_v, xi_v)
-    z_w : ndarray (N+1, eta_rho, xi_rho)
-        W-level depths (from set_depth, igrid=5).
-    mask_u, mask_v : ndarray
-
-    Returns
-    -------
-    ubar, vbar : ndarray (eta_u, xi_u) / (eta_v, xi_v)
-    """
-    # Layer thickness at u and v points
+    """Compute barotropic velocity by vertically integrating 3-D u/v."""
     dz_w = np.abs(z_w[1:] - z_w[:-1])
     dz_u = 0.5 * (dz_w[:, :, :-1] + dz_w[:, :, 1:])
     dz_v = 0.5 * (dz_w[:, :-1, :] + dz_w[:, 1:, :])
@@ -306,23 +238,6 @@ EDGE_NAMES = ['west', 'east', 'south', 'north']
 def extract_boundary(field_2d, field_3d_u, field_3d_v, boundaries):
     """
     Extract N/S/E/W boundary segments from full 2D and 3D fields.
-
-    Parameters
-    ----------
-    field_2d : dict
-        Dict of 2D fields: {'zeta': (eta, xi), 'ubar': (eta_u, xi_u), ...}
-    field_3d_u : ndarray (N, eta_u, xi_u)
-        3D u-velocity.
-    field_3d_v : ndarray (N, eta_v, xi_v)
-        3D v-velocity.
-    boundaries : list of bool [W, E, S, N]
-        Which boundaries are active.
-
-    Returns
-    -------
-    bry_data : dict of dict
-        bry_data['temp'][0] = temp_west (N, len_west)
-        bry_data['temp'][1] = temp_east, etc.
     """
     edges = {}
     for b, active in enumerate(boundaries):
@@ -342,30 +257,29 @@ def extract_boundary(field_2d, field_3d_u, field_3d_v, boundaries):
                 idx = 0 if edge == 'south' else -1
                 result[vname][b] = f2d[idx, :] if f2d.ndim == 2 else f2d[:, idx]
 
-    # 3D U: extracted at u-point edges
     result['u_3d'] = [None] * 4
     for edge, b in edges.items():
         if edge in ('west', 'east'):
             idx = 0 if edge == 'west' else -1
-            result['u_3d'][b] = field_3d_u[:, :, idx]  # (N, eta_u)
+            result['u_3d'][b] = field_3d_u[:, :, idx]
         else:
             idx = 0 if edge == 'south' else -1
-            result['u_3d'][b] = field_3d_u[:, idx, :]  # (N, xi_u)
+            result['u_3d'][b] = field_3d_u[:, idx, :]
 
     result['v_3d'] = [None] * 4
     for edge, b in edges.items():
         if edge in ('west', 'east'):
             idx = 0 if edge == 'west' else -1
-            result['v_3d'][b] = field_3d_v[:, :, idx]  # (N, eta_v)
+            result['v_3d'][b] = field_3d_v[:, :, idx]
         else:
             idx = 0 if edge == 'south' else -1
-            result['v_3d'][b] = field_3d_v[:, idx, :]  # (N, xi_v)
+            result['v_3d'][b] = field_3d_v[:, idx, :]
 
     return result
 
 
 # ---------------------------------------------------------------------------
-# NC file writers
+# NC file writer
 # ---------------------------------------------------------------------------
 
 def _put_var(ds, name, data, dims, **attrs):
@@ -380,145 +294,18 @@ def _put_var(ds, name, data, dims, **attrs):
     v[:] = data
 
 
-def write_ic_file(filename, metrics, vgrid_params, ocean_time,
-                  zeta, temp, salt, u, v, ubar, vbar):
-    """Write a standard ROMS initial conditions NetCDF file."""
-    spval = 1e37
-    ds = nc4.Dataset(filename, 'w', format='NETCDF3_64BIT')
-    ds.Description = 'ROMS initial conditions'
-    ds.Author = 'roms_prepro.icbc'
-    ds.Created = datetime.now().isoformat()
-
-    ny, nx = metrics['lon_rho'].shape
-    N = temp.shape[0]
-    mask = metrics.get('mask_rho', np.ones((ny, nx)))
-
-    for d in [('xi_rho', nx), ('xi_u', nx - 1), ('xi_v', nx),
-              ('xi_psi', nx - 1)]:
-        ds.createDimension(d[0], d[1])
-    for d in [('eta_rho', ny), ('eta_u', ny), ('eta_v', ny - 1),
-              ('eta_psi', ny - 1)]:
-        ds.createDimension(d[0], d[1])
-    ds.createDimension('s_rho', N)
-    ds.createDimension('ocean_time', None)
-
-    ds.createVariable('spherical', 'c')[:] = 'T'
-    for key in ('Vtransform', 'Vstretching'):
-        if key in vgrid_params:
-            ds.createVariable(key, 'i4', ())[:] = vgrid_params[key]
-
-    _put_var(ds, 'h', metrics['h'], ('eta_rho', 'xi_rho'),
-             long_name='bathymetry', units='meter')
-    _put_var(ds, 'lon_rho', metrics['lon_rho'], ('eta_rho', 'xi_rho'),
-             long_name='longitude', units='degree_east',
-             coordinates='lon_rho lat_rho', field='longitude, scalar')
-    _put_var(ds, 'lat_rho', metrics['lat_rho'], ('eta_rho', 'xi_rho'),
-             long_name='latitude', units='degree_north',
-             coordinates='lon_rho lat_rho', field='latitude, scalar')
-    _put_var(ds, 'mask_rho', metrics['mask_rho'], ('eta_rho', 'xi_rho'))
-
-    # Staggered-grid coordinates (required by ROMS for coordinates attribute references)
-    if 'lon_u' in metrics:
-        _put_var(ds, 'lon_u', metrics['lon_u'], ('eta_u', 'xi_u'),
-                 long_name='longitude at u-points', units='degree_east')
-    if 'lat_u' in metrics:
-        _put_var(ds, 'lat_u', metrics['lat_u'], ('eta_u', 'xi_u'),
-                 long_name='latitude at u-points', units='degree_north')
-    if 'lon_v' in metrics:
-        _put_var(ds, 'lon_v', metrics['lon_v'], ('eta_v', 'xi_v'),
-                 long_name='longitude at v-points', units='degree_east')
-    if 'lat_v' in metrics:
-        _put_var(ds, 'lat_v', metrics['lat_v'], ('eta_v', 'xi_v'),
-                 long_name='latitude at v-points', units='degree_north')
-
-    for key, value, long_name, units in [
-        ('theta_s', vgrid_params.get('theta_s', 5.0),
-         'S-coordinate surface control parameter', ''),
-        ('theta_b', vgrid_params.get('theta_b', 0.4),
-         'S-coordinate bottom control parameter', ''),
-        ('Tcline', vgrid_params.get('Tcline', 10.0),
-         'S-coordinate surface/bottom layer width', 'meter'),
-        ('hc', vgrid_params.get('hc', 10.0),
-         'S-coordinate parameter, critical depth', 'meter'),
-    ]:
-        ds.createVariable(key, 'f8', ())
-        setattr(ds.variables[key], 'long_name', long_name)
-        if units:
-            setattr(ds.variables[key], 'units', units)
-        ds.variables[key][:] = float(value)
-    if 's_rho' in vgrid_params:
-        _put_var(ds, 's_rho', np.asarray(vgrid_params['s_rho'], 'f8'),
-                 ('s_rho',), long_name='S-coordinate at RHO-points')
-    if 'Cs_r' in vgrid_params:
-        _put_var(ds, 'Cs_r', np.asarray(vgrid_params['Cs_r'], 'f8'),
-                 ('s_rho',), long_name='S-coordinate stretching at RHO-points')
-
-    ds.createVariable('ocean_time', 'f8', ('ocean_time',))
-    ds.variables['ocean_time'][:] = ocean_time
-    ds.variables['ocean_time'].units = 'seconds since 2000-01-01 00:00:00'
-    ds.variables['ocean_time'].field = 'time, scalar'
-    _put_var(ds, 'zeta', zeta[None, :, :], ('ocean_time', 'eta_rho', 'xi_rho'),
-             long_name='free surface', units='meter',
-             time='ocean_time', coordinates='lon_rho lat_rho',
-             field='free-surface, scalar')
-    temp_arr = temp[None].copy()
-    temp_arr[temp_arr == spval] = np.nan
-    temp_arr[:, :, mask < 0.5] = spval
-    temp_arr = np.where(np.isnan(temp_arr), spval, temp_arr)
-    _put_var(ds, 'temp', temp_arr, ('ocean_time', 's_rho', 'eta_rho', 'xi_rho'),
-             long_name='potential temperature', units='Celsius',
-             time='ocean_time', coordinates='lon_rho lat_rho',
-             field='temperature, scalar', _FillValue=spval, missing_value=spval)
-    salt_arr = salt[None].copy()
-    salt_arr = np.where(np.isnan(salt_arr), spval, salt_arr)
-    salt_arr[:, :, mask < 0.5] = spval
-    _put_var(ds, 'salt', salt_arr, ('ocean_time', 's_rho', 'eta_rho', 'xi_rho'),
-             long_name='salinity', units='PSU',
-             time='ocean_time', coordinates='lon_rho lat_rho',
-             field='salinity, scalar', _FillValue=spval, missing_value=spval)
-    _put_var(ds, 'u', u[None], ('ocean_time', 's_rho', 'eta_u', 'xi_u'),
-             long_name='u-momentum', units='m/s',
-             time='ocean_time', coordinates='lon_u lat_u',
-             field='u-velocity, scalar', _FillValue=spval, missing_value=spval)
-    _put_var(ds, 'v', v[None], ('ocean_time', 's_rho', 'eta_v', 'xi_v'),
-             long_name='v-momentum', units='m/s',
-             time='ocean_time', coordinates='lon_v lat_v',
-             field='v-velocity, scalar', _FillValue=spval, missing_value=spval)
-    _put_var(ds, 'ubar', ubar[None], ('ocean_time', 'eta_u', 'xi_u'),
-             long_name='barotropic u', units='m/s',
-             time='ocean_time', coordinates='lon_u lat_u',
-             field='ubar-velocity, scalar', _FillValue=spval, missing_value=spval)
-    _put_var(ds, 'vbar', vbar[None], ('ocean_time', 'eta_v', 'xi_v'),
-             long_name='barotropic v', units='m/s',
-             time='ocean_time', coordinates='lon_v lat_v',
-             field='vbar-velocity, scalar', _FillValue=spval, missing_value=spval)
-    ds.close()
-
-
 def write_bry_file(filename, metrics, vgrid_params, boundaries,
                    bry_data, bry_time):
     """
     Write a standard ROMS boundary conditions NetCDF file.
-
-    Parameters
-    ----------
-    filename : str
-    metrics : dict
-    vgrid_params : dict
-    boundaries : list of bool [W, E, S, N]
-    bry_data : dict
-        Keys: 'zeta', 'temp', 'salt', 'u', 'v', 'ubar', 'vbar'.
-        Each is a list of length 4: [west, east, south, north].
-    bry_time : ndarray (ntime,)
     """
     ds = nc4.Dataset(filename, 'w', format='NETCDF3_64BIT')
     ds.Description = 'ROMS boundary conditions'
-    ds.Author = 'roms_prepro.icbc'
+    ds.Author = 'roms_prepro.bc'
     ds.Created = datetime.now().isoformat()
 
     ny, nx = metrics['lon_rho'].shape
 
-    # Determine N from any 3D variable (data is (ntime, N, ...))
     N = 1
     for v in ['temp', 'salt', 'u', 'v']:
         if v in bry_data:
@@ -531,14 +318,10 @@ def write_bry_file(filename, metrics, vgrid_params, boundaries,
 
     ntime = len(bry_time)
 
-    # Global dimensions
     ds.createDimension('xi_rho', nx)
     ds.createDimension('eta_rho', ny)
     ds.createDimension('s_rho', N)
 
-    # ROMS expects per-variable time dimensions for boundary files.
-    # Use fixed size since we know ntime upfront.
-    # NETCDF3_64BIT only supports one unlimited dimension, so use fixed.
     ds.createDimension('zeta_time', ntime)
     ds.createDimension('v2d_time', ntime)
     ds.createDimension('v3d_time', ntime)
@@ -552,7 +335,6 @@ def write_bry_file(filename, metrics, vgrid_params, boundaries,
     _put_var(ds, 'h', metrics['h'], ('eta_rho', 'xi_rho'),
              long_name='bathymetry', units='meter')
 
-    # S-coordinate parameters (required by ROMS for vertical grid)
     for key, value, long_name, units in [
         ('theta_s', vgrid_params.get('theta_s', 5.0),
          'S-coordinate surface control parameter', ''),
@@ -569,14 +351,12 @@ def write_bry_file(filename, metrics, vgrid_params, boundaries,
             setattr(ds.variables[key], 'units', units)
         ds.variables[key][:] = float(value)
 
-    # s_rho, Cs_r from stretching function
     if 's_rho' in vgrid_params and 'Cs_r' in vgrid_params:
         _put_var(ds, 's_rho', np.asarray(vgrid_params['s_rho'], 'f8'),
                  ('s_rho',), long_name='S-coordinate at RHO-points')
         _put_var(ds, 'Cs_r', np.asarray(vgrid_params['Cs_r'], 'f8'),
                  ('s_rho',), long_name='S-coordinate stretching at RHO-points')
 
-    # Per-edge coordinate and boundary variables
     for b, active in enumerate(boundaries):
         if not active:
             continue
@@ -604,7 +384,6 @@ def write_bry_file(filename, metrics, vgrid_params, boundaries,
         if v_len != rho_len:
             ds.createDimension(v_dim_name, v_len)
 
-    # Write time variables (per-variable convention used by ROMS)
     def _write_time_var(tvar_name):
         tvar = ds.createVariable(tvar_name, 'f8', (tvar_name,))
         tvar[:] = bry_time
@@ -619,7 +398,6 @@ def write_bry_file(filename, metrics, vgrid_params, boundaries,
     temp_time_name = _write_time_var('temp_time')
     salt_time_name = _write_time_var('salt_time')
 
-    # Write boundary variables with time attribute pointing to proper time variable
     for b, active in enumerate(boundaries):
         if not active:
             continue
@@ -670,3 +448,197 @@ def write_bry_file(filename, metrics, vgrid_params, boundaries,
                      long_name=f'vbar, {edge} boundary', time=v2d_time_name)
 
     ds.close()
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared across BC modules
+# ---------------------------------------------------------------------------
+
+def _fill_nan_2d(arr, max_pass=5):
+    """Replace NaN cells with the nearest valid neighbour (KDTree)."""
+    arr = arr.copy()
+    bad = np.isnan(arr)
+    if not bad.any():
+        return arr
+    ok = ~bad
+    ny, nx = arr.shape
+    jj, ii = np.meshgrid(np.arange(nx), np.arange(ny))
+    ok_pts = np.column_stack((ii[ok], jj[ok]))
+    bad_pts = np.column_stack((ii[bad], jj[bad]))
+    if len(ok_pts) == 0:
+        return arr
+    tree = cKDTree(ok_pts)
+    _, idx = tree.query(bad_pts)
+    arr[bad] = arr[ok][idx]
+    return arr
+
+
+def _fill_nan(arr):
+    """Fill NaN in 3D arrays: horizontal KDTree per level,
+    then vertical copy for remaining NaN cells."""
+    if arr.ndim == 2:
+        return _fill_nan_2d(arr)
+    nk, ny, nx = arr.shape
+    out = np.zeros_like(arr)
+    for k in range(nk):
+        out[k] = _fill_nan_2d(arr[k])
+    for k in range(nk):
+        layer = out[k]
+        bad = np.isnan(layer)
+        if not bad.any():
+            continue
+        ji, ii = np.where(bad)
+        for j, i in zip(ji, ii):
+            for dk in range(1, nk):
+                for sign in [-1, 1]:
+                    kk = k + dk * sign
+                    if 0 <= kk < nk and not np.isnan(out[kk, j, i]):
+                        out[k, j, i] = out[kk, j, i]
+                        break
+                else:
+                    continue
+                break
+    return out
+
+
+def _parse_date(t):
+    """Convert date string / datetime / numeric to seconds since 1970-01-01 (UTC)."""
+    import calendar
+    if t is None:
+        return None
+    if isinstance(t, (int, float, np.floating, np.integer)):
+        return float(t)
+    if isinstance(t, datetime):
+        return calendar.timegm(t.timetuple()) + t.microsecond / 1e6
+    if isinstance(t, str):
+        for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S',
+                    '%Y-%m-%d', '%Y%m%d', '%Y/%m/%d', '%d-%b-%Y']:
+            try:
+                dt = datetime.strptime(t, fmt)
+                return calendar.timegm(dt.timetuple())
+            except ValueError:
+                continue
+    raise ValueError(f"Cannot parse date: {t}")
+
+
+def _get_time(file_path, time_var=None):
+    """Read time array from a source file. Returns seconds since 1970."""
+    ds = nc4.Dataset(file_path, 'r')
+    candidates = [time_var] if time_var else ['time', 'time_counter',
+                                               'ocean_time']
+    t_name = None
+    for c in candidates:
+        if c and c in ds.variables:
+            t_name = c; break
+    if t_name is None:
+        ds.close(); return None
+
+    t = np.atleast_1d(ds.variables[t_name][:]).astype(float)
+    units = getattr(ds.variables[t_name], 'units', '')
+    ds.close()
+
+    m = re.search(r'since\s+([\d\-]+\s[\d\:]+|[\d\-]+)', str(units))
+    if m:
+        ref_epoch = _parse_date(m.group(1))
+        if 'days' in str(units).lower():
+            t = t * 86400.0 + ref_epoch
+        elif 'hours' in str(units).lower():
+            t = t * 3600.0 + ref_epoch
+        else:
+            t = t + ref_epoch
+    return t
+
+
+def _match_idx(source_times, target_date):
+    """Find closest time index to target_date."""
+    target = _parse_date(target_date)
+    if target is None:
+        return 0
+    return int(np.argmin(np.abs(source_times - target)))
+
+
+def _filter_files(source_files, start_date=None, end_date=None,
+                  time_var=None):
+    """Filter files to [start_date, end_date]. Returns [(fp, [indices])]."""
+    t0 = _parse_date(start_date) if start_date else None
+    t1 = _parse_date(end_date) if end_date else None
+    filtered = []
+    for fp in sorted(source_files):
+        st = _get_time(fp, time_var)
+        if st is None:
+            filtered.append((fp, [0])); continue
+        idxs = [i for i, ti in enumerate(st)
+                if (t0 is None or ti >= t0) and (t1 is None or ti <= t1)]
+        if idxs:
+            filtered.append((fp, idxs))
+    return filtered
+
+
+def _read_source(file_path,
+                 lon_var=None, lat_var=None, depth_var=None,
+                 time_var=None, time_index=0,
+                 zeta_var=None, temp_var=None, salt_var=None,
+                 u_var=None, v_var=None):
+    """Read a Mercator/HYCOM/CMEMS NetCDF file with auto-detection."""
+    ds = nc4.Dataset(file_path, 'r')
+
+    def f(candidates, override):
+        if override and override in ds.variables:
+            return override
+        for c in candidates:
+            if c in ds.variables:
+                return c
+        raise KeyError(f"none of {candidates} found")
+
+    out = {}
+    out['lon'] = ds.variables[f(['longitude','lon'], lon_var)][:]
+    out['lat'] = ds.variables[f(['latitude','lat'], lat_var)][:]
+    out['depth'] = ds.variables[f(['depth','lev','deptht'], depth_var)][:]
+    out['depth'] = -np.abs(np.asarray(out['depth'], dtype=float))
+
+    out['lon_1d'] = np.asarray(out['lon'], dtype=float).ravel()
+    out['lat_1d'] = np.asarray(out['lat'], dtype=float).ravel()
+
+    for vn, cands, ov in [
+                ('zeta', ['zos','ssh','surf_el'], zeta_var),
+                ('temp', ['thetao','water_temp','votemper','temperature'], temp_var),
+                ('salt', ['so','salinity','vosaline'], salt_var),
+                ('u',    ['uo','water_u','vozocrtx'], u_var),
+                ('v',    ['vo','water_v','vomecrty'], v_var),
+                ]:
+            vname = f(cands, ov)
+            arr = ds.variables[vname][:]
+            var_dims = ds.variables[vname].dimensions
+            time_on_first = (
+                len(var_dims) >= 3 and
+                var_dims[0] in ds.dimensions and
+                'time' in var_dims[0].lower()
+            )
+            if time_on_first and arr.shape[0] > 1:
+                arr = arr[min(time_index, arr.shape[0] - 1)]
+            if hasattr(arr, 'mask'):
+                arr = arr.filled(np.nan)
+            out[vn] = arr
+
+    ds.close()
+    return out
+
+
+def _read_roms_grid(grid_file):
+    """Read ROMS grid into dict."""
+    g = nc4.Dataset(grid_file)
+    m = {}
+    for v in ['h','lon_rho','lat_rho','mask_rho','mask_u','mask_v','angle',
+              'lon_u','lat_u','lon_v','lat_v']:
+        if v in g.variables:
+            m[v] = g.variables[v][:]
+    ny, nx = m['lon_rho'].shape
+    for e, i in [('west',0),('east',-1)]:
+        m[f'lon_rho_{e}'] = m['lon_rho'][:,i]
+        m[f'lat_rho_{e}'] = m['lat_rho'][:,i]
+    for e, i in [('south',0),('north',-1)]:
+        m[f'lon_rho_{e}'] = m['lon_rho'][i,:]
+        m[f'lat_rho_{e}'] = m['lat_rho'][i,:]
+    m['mask_rho'] = m.get('mask_rho', np.ones(m['h'].shape))
+    g.close()
+    return m

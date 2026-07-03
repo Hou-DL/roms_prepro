@@ -8,7 +8,7 @@ coordinates via the ``grid`` module (no ``pyroms`` dependency).
 
 import numpy as np
 import netCDF4 as nc
-from ..icbc._core import sigma_to_z
+from ..ic._core import sigma_to_z
 from ..grid.vgrid import set_depth, stretching
 
 
