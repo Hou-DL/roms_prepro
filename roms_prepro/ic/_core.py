@@ -726,7 +726,7 @@ def cmems_read_var(file_path, var_name, time_index=0):
     return data, lon_1d, lat_1d, depth, time_units
 
 
-def cmems_interp_2d(data, lon_1d, lat_1d, lon_rho, lat_rho):
+def cmems_interp_2d(data, lon_1d, lat_1d, lon_rho, lat_rho, out_shape=None):
     """Interpolate 2D CMEMS field to ROMS grid using RegularGridInterpolator."""
     lat_s, lon_s = lat_1d.copy(), lon_1d.copy()
     d = data.copy()
@@ -740,7 +740,22 @@ def cmems_interp_2d(data, lon_1d, lat_1d, lon_rho, lat_rho):
     interp = RegularGridInterpolator(
         (lat_s, lon_s), d,
         method='linear', bounds_error=False, fill_value=np.nan)
-    return interp((lat_rho, lon_rho))
+    
+    # Handle 2D ROMS grids (preferred) and 1D coordinate arrays
+    if lat_rho.ndim == 2:
+        result = interp((lat_rho, lon_rho))
+    elif lat_rho.ndim == 1 and lon_rho.ndim == 1:
+        # 1D coords: create 2D meshgrid for querying
+        lon_q, lat_q = np.meshgrid(lon_rho, lat_rho)
+        result = interp((lat_q, lon_q))
+    else:
+        result = interp((lat_rho, lon_rho))
+    
+    # Force reshape if output shape is specified
+    if out_shape is not None and result.shape != out_shape:
+        result = result.reshape(out_shape)
+    
+    return result
 
 
 def cmems_interp_3d(data, lon_1d, lat_1d, depth_vals, lon_rho, lat_rho, z_r):
@@ -748,9 +763,42 @@ def cmems_interp_3d(data, lon_1d, lat_1d, depth_vals, lon_rho, lat_rho, z_r):
     nlat_r, nlon_r, N = z_r.shape
     ndepth_src = data.shape[2]
 
+    # Create 2D query grid from ROMS coordinates, ensuring correct shape
+    if lat_rho.ndim == 2 and lon_rho.ndim == 2:
+        lat_q, lon_q = lat_rho, lon_rho
+    elif lat_rho.ndim == 1 and lon_rho.ndim == 1:
+        lon_q, lat_q = np.meshgrid(lon_rho, lat_rho)
+    else:
+        lat_q, lon_q = lat_rho, lon_rho
+    
+    # Ensure query grid matches z_r shape
+    if lat_q.shape != (nlat_r, nlon_r):
+        if lat_q.size == nlat_r * nlon_r:
+            lat_q = lat_q.reshape(nlat_r, nlon_r)
+            lon_q = lon_q.reshape(nlat_r, nlon_r)
+
     Flev = np.full((nlat_r, nlon_r, ndepth_src), np.nan)
     for k in range(ndepth_src):
-        Flev[:, :, k] = cmems_interp_2d(data[:, :, k], lon_1d, lat_1d, lon_rho, lat_rho)
+        Flev[:, :, k] = cmems_interp_2d(data[:, :, k], lon_1d, lat_1d, lon_q, lat_q)
+
+    Fout = np.zeros((nlat_r, nlon_r, N))
+    for i in range(nlat_r):
+        for j in range(nlon_r):
+            src = Flev[i, j, :]
+            valid = ~np.isnan(src)
+            if np.sum(valid) < 2:
+                continue
+            src_z = depth_vals[valid]
+            src_v = src[valid]
+            target_z = z_r[i, j, :]
+            # Sort src_z ascending for np.interp
+            order = np.argsort(src_z)
+            src_z = src_z[order]
+            src_v = src_v[order]
+            target_z_clipped = np.clip(target_z, src_z.min(), src_z.max())
+            Fout[i, j, :] = np.interp(target_z_clipped, src_z, src_v)
+
+    return Fout
 
     Fout = np.full((nlat_r, nlon_r, N), np.nan)
     for i in range(nlat_r):

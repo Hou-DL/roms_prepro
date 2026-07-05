@@ -252,10 +252,10 @@ def cmems_to_roms_ini(roms_grid_file, zeta_file=None, temp_file=None,
 
     # ROMS depths
     ssh = np.zeros_like(zeta)
-    z_r = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, 1, h, ssh)
-    z_u = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, 3, h, ssh)
-    z_v = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, 4, h, ssh)
-    z_w = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, 5, h, zeta)
+    z_r = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, h, ssh, igrid=1)
+    z_u = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, h, ssh, igrid=3)
+    z_v = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, h, ssh, igrid=4)
+    z_w = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, h, zeta, igrid=5)
     Hz = z_w[:, :, 1:N+1] - z_w[:, :, 0:N]
 
     # 3D interpolation (depths are negative, matching z_r)
