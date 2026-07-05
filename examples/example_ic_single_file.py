@@ -7,6 +7,9 @@ Usage:
     python example_ic_single_file.py
 """
 
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from roms_prepro.ic import mercator_to_roms_ini
 
 # ===================================================================

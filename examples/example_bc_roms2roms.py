@@ -8,6 +8,9 @@ Usage:
     python example_bc_roms2roms.py
 """
 
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from roms_prepro.bc import roms_to_roms_bry
 
 # ===================================================================

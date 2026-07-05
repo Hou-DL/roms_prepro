@@ -8,6 +8,9 @@ Usage:
     python example_z_levels.py
 """
 
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from roms_prepro.remapping import process_file, DEFAULT_STD_DEPTHS
 import numpy as np
 

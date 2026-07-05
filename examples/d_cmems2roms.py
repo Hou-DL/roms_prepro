@@ -8,6 +8,9 @@ Usage:
     python d_cmems2roms.py
 """
 
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from roms_prepro.ic import cmems_to_roms_ini
 
 # ===================================================================
@@ -15,13 +18,13 @@ from roms_prepro.ic import cmems_to_roms_ini
 # ===================================================================
 
 # ROMS grid file
-GRDNAME = 'my_grid.nc'
+GRDNAME = r"D:\testFile\windcompare\tropical_5km_grid_629.nc"
 
 # Output IC file
-ININAME = 'my_ini.nc'
+ININAME = r"D:\testFile\windcompare\tropical_5km_ini20160903.nc"
 
 # CMEMS data directory
-DATA_DIR = '/data/hdl/oceanfiles/CMEMS/'
+DATA_DIR = r"E:\Ocean_data\mercator\CMEMS_TRO_2016.nc"
 
 # CMEMS file paths
 ZFILE = f'{DATA_DIR}/cmems_zos_202505.nc'
@@ -42,7 +45,7 @@ TCLINE = 25.0
 N = 30
 
 # Which date's IC to make (time_index auto-detected)
-IC_DATE = '2025-05-03'
+IC_DATE = '2016-09-03'
 
 # ===================================================================
 # Run
