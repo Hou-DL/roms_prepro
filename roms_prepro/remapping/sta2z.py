@@ -6,7 +6,14 @@ no horizontal dimension — vertical interpolation per station only.
 """
 
 import numpy as np
-from ..ic._core import sigma_to_z
+import os
+import sys
+
+try:
+    from ..ic._core import sigma_to_z
+except ImportError:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from ic._core import sigma_to_z
 
 
 def station_to_z_levels(var_sigma, sigma_depth, z_levels, spval=1e37):

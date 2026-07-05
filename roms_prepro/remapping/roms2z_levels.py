@@ -22,7 +22,11 @@ import sys
 import time
 import numpy as np
 
-from ..grid.vgrid import set_depth, stretching
+try:
+    from ..grid.vgrid import set_depth, stretching
+except ImportError:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from grid.vgrid import set_depth, stretching
 
 
 # Default standard depth levels (positive, meters)

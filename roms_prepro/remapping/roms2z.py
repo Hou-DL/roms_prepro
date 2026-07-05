@@ -8,8 +8,16 @@ coordinates via the ``grid`` module (no ``pyroms`` dependency).
 
 import numpy as np
 import netCDF4 as nc
-from ..ic._core import sigma_to_z
-from ..grid.vgrid import set_depth, stretching
+import os
+import sys
+
+try:
+    from ..ic._core import sigma_to_z
+    from ..grid.vgrid import set_depth, stretching
+except ImportError:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from ic._core import sigma_to_z
+    from grid.vgrid import set_depth, stretching
 
 
 def sigma_to_z_levels(var, grid_file, z_levels, Cpos='rho',

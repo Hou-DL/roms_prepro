@@ -16,11 +16,18 @@ import glob
 import numpy as np
 import netCDF4 as nc4
 
-from ._core import (horizontal_interp, sigma_to_z, z_to_sigma,
-                    rotate_uv, uv_to_cgrid, compute_ubar_vbar,
-                    write_bry_file, EDGE_NAMES,
-                    _fill_nan, _parse_date, _get_time, _match_idx,
-                    _filter_files, _read_roms_grid)
+try:
+    from ._core import (horizontal_interp, sigma_to_z, z_to_sigma,
+                        rotate_uv, uv_to_cgrid, compute_ubar_vbar,
+                        write_bry_file, EDGE_NAMES,
+                        _fill_nan, _parse_date, _get_time, _match_idx,
+                        _filter_files, _read_roms_grid)
+except ImportError:
+    from _core import (horizontal_interp, sigma_to_z, z_to_sigma,
+                       rotate_uv, uv_to_cgrid, compute_ubar_vbar,
+                       write_bry_file, EDGE_NAMES,
+                       _fill_nan, _parse_date, _get_time, _match_idx,
+                       _filter_files, _read_roms_grid)
 
 DEFAULT_Z = np.array([
     -7500, -7000, -6500, -6000, -5500, -5000, -4500, -4000, -3500,
@@ -158,7 +165,11 @@ def roms_to_roms_bry(src_grid_file, src_hist_files=None, dst_grid_file=None,
     time_ref : str, optional
         时间参考，自动从源文件 ocean_time 单位读取
     """
-    from ..grid import set_depth
+    try:
+        from ..grid import set_depth
+    except ImportError:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from grid import set_depth
     from datetime import datetime
 
     if z_levels is None:

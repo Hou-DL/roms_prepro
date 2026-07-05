@@ -37,10 +37,16 @@ import numpy as np
 import netCDF4 as nc4
 from datetime import datetime, timedelta
 
-from ._core import (horizontal_interp, z_to_sigma,
-                    rotate_uv, uv_to_cgrid, compute_ubar_vbar,
-                    write_ic_file, _fill_nan, _parse_date, _get_time,
-                    _match_idx, _read_source, _read_roms_grid)
+try:
+    from ._core import (horizontal_interp, z_to_sigma,
+                        rotate_uv, uv_to_cgrid, compute_ubar_vbar,
+                        write_ic_file, _fill_nan, _parse_date, _get_time,
+                        _match_idx, _read_source, _read_roms_grid)
+except ImportError:
+    from _core import (horizontal_interp, z_to_sigma,
+                       rotate_uv, uv_to_cgrid, compute_ubar_vbar,
+                       write_ic_file, _fill_nan, _parse_date, _get_time,
+                       _match_idx, _read_source, _read_roms_grid)
 
 
 def _find_var_name(ds, candidates):
@@ -225,10 +231,16 @@ def _fill_nan_2d_range_check(data, var_type='temp'):
         data[np.abs(data) > 100] = np.nan
 
     if data.ndim == 2:
-        from ._core import _fill_nan_2d
+        try:
+            from ._core import _fill_nan_2d
+        except ImportError:
+            from _core import _fill_nan_2d
         return _fill_nan_2d(data)
     else:
-        from ._core import _fill_nan_2d
+        try:
+            from ._core import _fill_nan_2d
+        except ImportError:
+            from _core import _fill_nan_2d
         for k in range(data.shape[0]):
             data[k] = _fill_nan_2d(data[k])
         return data
@@ -335,7 +347,11 @@ def mercator_to_roms_ini(roms_grid_file, source_file, ini_file,
     time_ref : str, optional
         时间参考，自动从源文件时间单位读取
     """
-    from ..grid import set_depth
+    try:
+        from ..grid import set_depth
+    except ImportError:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from grid import set_depth
     metrics = _read_roms_grid(roms_grid_file)
 
     # 自动检测时间参考
@@ -401,7 +417,11 @@ def mercator_to_roms_ini(roms_grid_file, source_file, ini_file,
     else:
         ocean_time = np.array([0.0])
 
-    from ..grid import stretching
+    try:
+        from ..grid import stretching
+    except ImportError:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from grid import stretching
     s_rho, Cs_r = stretching(Vstretching, theta_s, theta_b, N, kgrid=0)
     s_w, Cs_w = stretching(Vstretching, theta_s, theta_b, N, kgrid=1)
     vgrid_params = {'Vtransform': Vtransform, 'Vstretching': Vstretching,
@@ -453,7 +473,11 @@ def cmems_to_roms_ini(roms_grid_file=None, zeta_file=None, temp_file=None,
     time_index : int
         CMEMS 文件中的时间步索引（如果指定了 init_date 则自动计算）
     """
-    from ..grid import set_depth, stretching
+    try:
+        from ..grid import set_depth, stretching
+    except ImportError:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from grid import set_depth, stretching
 
     print('\nReading CMEMS data ...\n')
 
@@ -491,13 +515,13 @@ def cmems_to_roms_ini(roms_grid_file=None, zeta_file=None, temp_file=None,
     def _read_var(file, var, is_zeta=False):
         """读取变量，zeta 文件可能无深度"""
         src = _read_cmems_file(file, var, time_index)
-        return src['data'], src.get('depth'), src.get('lon_1d'), src.get('lat_1d'), src.get('time_units')
+        return src['data'], src.get('depth'), src.get('lon_1d'), src.get('lat_1d')
 
-    Zeta, _, Tlon_1d, Tlat_1d, _ = _read_var(zeta_file, zeta_var, is_zeta=True)
-    Temp, Tdepth, _, _, time_units = _read_var(temp_file, temp_var)
-    Salt, _, _, _, _ = _read_var(salt_file, salt_var)
-    Uvel, Udepth, Ulon_1d, Ulat_1d, _ = _read_var(u_file, u_var)
-    Vvel, Vdepth, _, _, _ = _read_var(v_file, v_var)
+    Zeta, _, Tlon_1d, Tlat_1d = _read_var(zeta_file, zeta_var, is_zeta=True)
+    Temp, Tdepth, _, _ = _read_var(temp_file, temp_var)
+    Salt, _, _, _ = _read_var(salt_file, salt_var)
+    Uvel, Udepth, Ulon_1d, Ulat_1d = _read_var(u_file, u_var)
+    Vvel, Vdepth, _, _ = _read_var(v_file, v_var)
 
     print('\n  Filling NaN in CMEMS data with 2D nearest neighbor...')
 
@@ -557,13 +581,14 @@ def cmems_to_roms_ini(roms_grid_file=None, zeta_file=None, temp_file=None,
             print(f'  警告: 无法检测时间参考，使用默认值: {time_ref}')
 
     # 使用 init_date 自动选择时间步
-    if init_date is not None and time_units:
+    if init_date is not None and temp_src.get('time_units'):
         # 从 CMEMS 文件读取时间信息
         try:
             ds = nc4.Dataset(temp_file, 'r')
             time_name = _find_dim_name(ds, ['time', 'time_counter', 't'])
             if time_name:
                 time_var = ds.variables[time_name]
+                time_units = getattr(time_var, 'units', '')
                 time_values = time_var[:]
                 ds.close()
 
@@ -579,14 +604,8 @@ def cmems_to_roms_ini(roms_grid_file=None, zeta_file=None, temp_file=None,
                         except ValueError:
                             ref_dt = datetime(1950, 1, 1)
 
-                    # 转换时间值（CMEMS 通常是 days since）
-                    if 'day' in time_units.lower():
-                        time_seconds = time_values * 86400.0
-                    elif 'hour' in time_units.lower():
-                        time_seconds = time_values * 3600.0
-                    else:
-                        time_seconds = time_values
-
+                    # 转换时间值
+                    time_seconds = time_values * 86400.0  # assuming days
                     time_dates = [ref_dt + timedelta(seconds=float(s)) for s in time_seconds]
 
                     # 查找匹配的日期
@@ -600,11 +619,11 @@ def cmems_to_roms_ini(roms_grid_file=None, zeta_file=None, temp_file=None,
                             best_idx = i
 
                     time_index = best_idx
-                    print(f'  init_date={init_date} -> time index {time_index} ({time_dates[time_index]})')
+                    print(f'  init_date={init_date} → time index {time_index} ({time_dates[time_index]})')
             else:
                 ds.close()
         except Exception as e:
-            print(f'  Warning: auto time selection failed: {e}')
+            print(f'  警告: 自动选择时间步失败: {e}')
 
     ref_dt = datetime.strptime(time_ref, '%Y-%m-%d')
     init_dt = datetime.strptime(init_date, '%Y-%m-%d')
