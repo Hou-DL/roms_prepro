@@ -238,7 +238,7 @@ def cmems_to_roms_ini(roms_grid_file, zeta_file=None, temp_file=None,
     # === Step 7: Write NetCDF ===
     print('\nWriting NetCDF ...')
     _write_ic_netcdf(ini_file, h, lon_rho, lat_rho, lon_u, lat_u, lon_v, lat_v,
-                     ocean_time, theta_s, theta_b, Tcline, theta_s, Tcline,
+                     ocean_time, theta_s, theta_b, Tcline, Tcline,
                      N, zeta, ubar, vbar, u, v, temp, salt, Vtransform, Vstretching)
 
     print('=' * 60)
