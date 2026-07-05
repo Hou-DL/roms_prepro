@@ -515,13 +515,13 @@ def cmems_to_roms_ini(roms_grid_file=None, zeta_file=None, temp_file=None,
     def _read_var(file, var, is_zeta=False):
         """读取变量，zeta 文件可能无深度"""
         src = _read_cmems_file(file, var, time_index)
-        return src['data'], src.get('depth'), src.get('lon_1d'), src.get('lat_1d')
+        return src['data'], src.get('depth'), src.get('lon_1d'), src.get('lat_1d'), src.get('time_units')
 
-    Zeta, _, Tlon_1d, Tlat_1d = _read_var(zeta_file, zeta_var, is_zeta=True)
-    Temp, Tdepth, _, _ = _read_var(temp_file, temp_var)
-    Salt, _, _, _ = _read_var(salt_file, salt_var)
-    Uvel, Udepth, Ulon_1d, Ulat_1d = _read_var(u_file, u_var)
-    Vvel, Vdepth, _, _ = _read_var(v_file, v_var)
+    Zeta, _, Tlon_1d, Tlat_1d, _ = _read_var(zeta_file, zeta_var, is_zeta=True)
+    Temp, Tdepth, _, _, time_units = _read_var(temp_file, temp_var)
+    Salt, _, _, _, _ = _read_var(salt_file, salt_var)
+    Uvel, Udepth, Ulon_1d, Ulat_1d, _ = _read_var(u_file, u_var)
+    Vvel, Vdepth, _, _, _ = _read_var(v_file, v_var)
 
     print('\n  Filling NaN in CMEMS data with 2D nearest neighbor...')
 
@@ -581,15 +581,13 @@ def cmems_to_roms_ini(roms_grid_file=None, zeta_file=None, temp_file=None,
             print(f'  警告: 无法检测时间参考，使用默认值: {time_ref}')
 
     # 使用 init_date 自动选择时间步
-    if init_date is not None and temp_src.get('time_units'):
+    if init_date is not None and time_units:
         # 从 CMEMS 文件读取时间信息
         try:
             ds = nc4.Dataset(temp_file, 'r')
             time_name = _find_dim_name(ds, ['time', 'time_counter', 't'])
             if time_name:
-                time_var = ds.variables[time_name]
-                time_units = getattr(time_var, 'units', '')
-                time_values = time_var[:]
+                time_values = ds.variables[time_name][:]
                 ds.close()
 
                 # 解析时间
