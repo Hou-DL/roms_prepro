@@ -715,7 +715,8 @@ def cmems_read_var(file_path, var_name, time_index=0):
 
     depth = None
     if depth_name and depth_name in ds.variables:
-        depth = -np.abs(np.asarray(ds.variables[depth_name][:], dtype=float))
+        depth = np.asarray(ds.variables[depth_name][:], dtype=float)
+        depth = np.abs(depth)  # Keep positive (matches reference)
 
     time_units = None
     if time_name and time_name in ds.variables:
@@ -761,6 +762,10 @@ def cmems_interp_3d(data, lon_1d, lat_1d, depth_vals, lon_rho, lat_rho, z_r):
             src_z = depth_vals[valid]
             src_v = src[valid]
             target_z = z_r[i, j, :]
+            # Sort src_z ascending (required by np.interp)
+            order = np.argsort(src_z)
+            src_z = src_z[order]
+            src_v = src_v[order]
             target_z_clipped = np.clip(target_z, src_z.min(), src_z.max())
             Fout[i, j, :] = np.interp(target_z_clipped, src_z, src_v)
 

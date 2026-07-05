@@ -24,14 +24,14 @@ GRDNAME = r"D:\testFile\windcompare\tropical_5km_grid_629.nc"
 ININAME = r"D:\testFile\windcompare\tropical_5km_ini20160903.nc"
 
 # CMEMS data directory
-DATA_DIR = r"E:\Ocean_data\mercator\CMEMS_TRO_2016.nc"
+DATA_DIR = r"E:\Ocean_data\mercator"
 
 # CMEMS file paths
-ZFILE = f'{DATA_DIR}/cmems_zos_202505.nc'
-TFILE = f'{DATA_DIR}/cmems_thetao_202505.nc'
-SFILE = f'{DATA_DIR}/cmems_so_202505.nc'
-UFILE = f'{DATA_DIR}/cmems_uo_202505.nc'
-VFILE = f'{DATA_DIR}/cmems_vo_202505.nc'
+ZFILE = f'{DATA_DIR}/CMEMS_TRO_2016.nc'
+TFILE = f'{DATA_DIR}/CMEMS_TRO_2016.nc'
+SFILE = f'{DATA_DIR}/CMEMS_TRO_2016.nc'
+UFILE = f'{DATA_DIR}/CMEMS_TRO_2016.nc'
+VFILE = f'{DATA_DIR}/CMEMS_TRO_2016.nc'
 
 # CMEMS variable names
 ZVAR, TVAR, SVAR, UVAR, VVAR = 'zos', 'thetao', 'so', 'uo', 'vo'
