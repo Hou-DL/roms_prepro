@@ -122,13 +122,14 @@ def _read_cmems_file(file_path, var_name=None, time_index=0):
             raise ValueError(f"变量 {var_name} 不在 {file_path} 中")
 
     v = ds.variables[var_name]
-    data = v[:]
 
-    # 处理时间维度
+    # 只读取需要的时间步（避免读取整个文件的所有时间步）
     var_dims = v.dimensions
     has_time = (time_name and time_name in var_dims and len(var_dims) >= 3)
-    if has_time and data.shape[0] > 1:
-        data = data[min(time_index, data.shape[0] - 1)]
+    if has_time and v.shape[0] > 1:
+        data = v[min(time_index, v.shape[0] - 1)]
+    else:
+        data = v[:]
 
     # 转换masked array
     if hasattr(data, 'mask'):

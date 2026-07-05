@@ -478,21 +478,23 @@ def write_ic_file(filename, metrics, vgrid_params, ocean_time,
 # ---------------------------------------------------------------------------
 
 def _fill_nan_2d(arr, max_pass=5):
-    """Replace NaN cells with the nearest valid neighbour (KDTree)."""
+    """Replace NaN cells with the nearest valid neighbour (distance transform).
+
+    Uses scipy.ndimage.distance_transform_edt for fast nearest-neighbor
+    filling on regular grids. Much faster than KDTree for this use case.
+    """
+    from scipy.ndimage import distance_transform_edt
+
     arr = arr.copy()
-    bad = np.isnan(arr)
-    if not bad.any():
+    nan_mask = np.isnan(arr)
+    if not nan_mask.any():
         return arr
-    ok = ~bad
-    ny, nx = arr.shape
-    jj, ii = np.meshgrid(np.arange(nx), np.arange(ny))
-    ok_pts = np.column_stack((ii[ok], jj[ok]))
-    bad_pts = np.column_stack((ii[bad], jj[bad]))
-    if len(ok_pts) == 0:
+    if np.all(nan_mask):
         return arr
-    tree = cKDTree(ok_pts)
-    _, idx = tree.query(bad_pts)
-    arr[bad] = arr[ok][idx]
+
+    # distance_transform_edt returns indices of nearest non-NaN pixel
+    _, idx = distance_transform_edt(~nan_mask, return_indices=True)
+    arr[nan_mask] = arr[idx[0][nan_mask], idx[1][nan_mask]]
     return arr
 
 
