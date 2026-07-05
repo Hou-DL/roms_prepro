@@ -557,7 +557,7 @@ def cmems_to_roms_ini(roms_grid_file=None, zeta_file=None, temp_file=None,
             print(f'  警告: 无法检测时间参考，使用默认值: {time_ref}')
 
     # 使用 init_date 自动选择时间步
-    if init_date is not None and temp_file.get('time_units'):
+    if init_date is not None and temp_src.get('time_units'):
         # 从 CMEMS 文件读取时间信息
         try:
             ds = nc4.Dataset(temp_file, 'r')
