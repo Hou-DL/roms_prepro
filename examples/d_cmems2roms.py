@@ -18,17 +18,18 @@ from roms_prepro.ic import cmems_to_roms_ini
 # ===================================================================
 
 # ROMS grid file
-GRDNAME = r"D:\testFile\windcompare\tropical_5km_grid_629.nc"
+GRDNAME = r"/data/hdl/roms_prepro/examples/tropical_5km_grid_629.nc"
 
 # Output IC file
-ININAME = r"D:\testFile\windcompare\tropical_5km_ini20160903.nc"
+ININAME = r"/data/hdl/roms_prepro/examples/tropical_5km_ini20160903.nc"
 import netCDF4 as nc
+g = nc.Dataset(GRDNAME)
 g = nc.Dataset(GRDNAME)
 print('h shape:', g.variables['h'].shape)
 print('lon_rho shape:', g.variables['lon_rho'].shape)
 print('lat_rho shape:', g.variables['lat_rho'].shape)
 # CMEMS data directory
-DATA_DIR = r"E:\Ocean_data\mercator"
+DATA_DIR = r"/data/hdl/oceanfiles/CMEMS"
 
 # CMEMS file paths
 ZFILE = f'{DATA_DIR}/CMEMS_TRO_2016.nc'
