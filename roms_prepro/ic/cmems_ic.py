@@ -256,7 +256,8 @@ def cmems_to_roms_ini(roms_grid_file, zeta_file=None, temp_file=None,
     z_u = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, h, ssh, igrid=3)
     z_v = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, h, ssh, igrid=4)
     z_w = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, h, zeta, igrid=5)
-    Hz = z_w[:, :, 1:N+1] - z_w[:, :, 0:N]
+    # z_w shape: (N+1, eta, xi); Hz = thickness of each sigma layer
+    Hz = z_w[1:, :, :] - z_w[:-1, :, :]
 
     # 3D interpolation (depths are negative, matching z_r)
     print('  Interpolating temp ...')
@@ -277,14 +278,16 @@ def cmems_to_roms_ini(roms_grid_file, zeta_file=None, temp_file=None,
     v = 0.5 * (Vrot[:-1, :, :] + Vrot[1:, :, :])
 
     # === Step 6: Barotropic velocity ===
-    Hz_u = 0.5 * (Hz[:, :-1, :] + Hz[:, 1:, :])
-    Hz_v = 0.5 * (Hz[:-1, :, :] + Hz[1:, :, :])
-    sum_Hz_u = np.sum(Hz_u, axis=2)
-    sum_Hz_v = np.sum(Hz_v, axis=2)
+    # Hz: (N, eta, xi), u: (eta, xi-1, N), v: (eta-1, xi, N)
+    Hz_u = 0.5 * (Hz[:, :, :-1] + Hz[:, :, 1:])  # (N, eta, xi-1)
+    Hz_v = 0.5 * (Hz[:, :-1, :] + Hz[:, 1:, :])  # (N, eta-1, xi)
+    sum_Hz_u = np.sum(Hz_u, axis=0)  # (eta, xi-1)
+    sum_Hz_v = np.sum(Hz_v, axis=0)  # (eta-1, xi)
     sum_Hz_u[sum_Hz_u == 0] = 1
     sum_Hz_v[sum_Hz_v == 0] = 1
-    ubar = np.sum(u * Hz_u, axis=2) / sum_Hz_u
-    vbar = np.sum(v * Hz_v, axis=2) / sum_Hz_v
+    # Transpose Hz to match u/v shape: (eta, xi-1, N)
+    ubar = np.sum(u * Hz_u.transpose(1, 2, 0), axis=2) / sum_Hz_u
+    vbar = np.sum(v * Hz_v.transpose(1, 2, 0), axis=2) / sum_Hz_v
 
     # === Step 7: Apply land masks ===
     print('Applying land masks ...')

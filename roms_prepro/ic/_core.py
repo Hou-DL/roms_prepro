@@ -759,8 +759,11 @@ def cmems_interp_2d(data, lon_1d, lat_1d, lon_rho, lat_rho, out_shape=None):
 
 
 def cmems_interp_3d(data, lon_1d, lat_1d, depth_vals, lon_rho, lat_rho, z_r):
-    """Interpolate 3D CMEMS field: horizontal per layer, vertical per point."""
-    nlat_r, nlon_r, N = z_r.shape
+    """Interpolate 3D CMEMS field: horizontal per layer, vertical per point.
+    
+    z_r shape: (N, eta, xi) from grid.vgrid.set_depth
+    """
+    N_sigma, nlat_r, nlon_r = z_r.shape  # Note: z_r is (N, eta, xi)
     ndepth_src = data.shape[2]
 
     # Create 2D query grid from ROMS coordinates, ensuring correct shape
@@ -781,7 +784,7 @@ def cmems_interp_3d(data, lon_1d, lat_1d, depth_vals, lon_rho, lat_rho, z_r):
     for k in range(ndepth_src):
         Flev[:, :, k] = cmems_interp_2d(data[:, :, k], lon_1d, lat_1d, lon_q, lat_q)
 
-    Fout = np.zeros((nlat_r, nlon_r, N))
+    Fout = np.zeros((nlat_r, nlon_r, N_sigma))
     for i in range(nlat_r):
         for j in range(nlon_r):
             src = Flev[i, j, :]
@@ -790,7 +793,7 @@ def cmems_interp_3d(data, lon_1d, lat_1d, depth_vals, lon_rho, lat_rho, z_r):
                 continue
             src_z = depth_vals[valid]
             src_v = src[valid]
-            target_z = z_r[i, j, :]
+            target_z = z_r[:, i, j]  # z_r is (N, eta, xi)
             # Sort src_z ascending for np.interp
             order = np.argsort(src_z)
             src_z = src_z[order]

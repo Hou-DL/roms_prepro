@@ -22,7 +22,11 @@ GRDNAME = r"D:\testFile\windcompare\tropical_5km_grid_629.nc"
 
 # Output IC file
 ININAME = r"D:\testFile\windcompare\tropical_5km_ini20160903.nc"
-
+import netCDF4 as nc
+g = nc.Dataset(GRDNAME)
+print('h shape:', g.variables['h'].shape)
+print('lon_rho shape:', g.variables['lon_rho'].shape)
+print('lat_rho shape:', g.variables['lat_rho'].shape)
 # CMEMS data directory
 DATA_DIR = r"E:\Ocean_data\mercator"
 
