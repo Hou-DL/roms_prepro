@@ -368,7 +368,11 @@ def _write_ic_netcdf(fname, h, lon_rho, lat_rho, lon_u, lat_u, lon_v, lat_v,
     add_var('u', u, ('eta_u', 'xi_u', 's_rho'), 'u-momentum component', 'meter second-1')
     add_var('v', v, ('eta_v', 'xi_v', 's_rho'), 'v-momentum component', 'meter second-1')
 
-    ds.to_netcdf(fname, engine='h5netcdf')
+    # Write with h5netcdf (handles Chinese paths), fall back to netCDF4
+    try:
+        ds.to_netcdf(fname, engine='h5netcdf')
+    except (ImportError, ModuleNotFoundError):
+        ds.to_netcdf(fname, engine='netcdf4')
     ds.close()
 
 
