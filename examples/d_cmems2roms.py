@@ -43,11 +43,11 @@ ZVAR, TVAR, SVAR, UVAR, VVAR = 'zos', 'thetao', 'so', 'uo', 'vo'
 
 # ROMS parameters
 VTRANSFORM = 2
-VSTRETCHING = 3
-THETA_S = 2.5
-THETA_B = 1.0
-TCLINE = 25.0
-N = 30
+VSTRETCHING = 4
+THETA_S = 5
+THETA_B = 2.0
+TCLINE = 200.0
+N = 50
 
 # Which date's IC to make (time_index auto-detected)
 IC_DATE = '2016-09-03'
