@@ -247,6 +247,31 @@ def cmems_to_roms_ini(roms_grid_file, zeta_file=None, temp_file=None,
             'ubar': ubar, 'vbar': vbar}
 
 
+def _stretching(Vstretching, theta_s, theta_b, N, kgrid):
+    """ROMS vertical stretching function (matches reference signature)."""
+    ds = 1.0 / N
+    if kgrid == 0:
+        s = (np.arange(1, N + 1) - 0.5) * ds - 1.0
+    else:
+        s = np.arange(0, N + 1) * ds - 1.0
+
+    if Vstretching == 1:
+        C = (1.0 - theta_b) * np.sinh(theta_s * s) / np.sinh(theta_s) + \
+            theta_b * (np.tanh(theta_s * (s + 0.5)) / (2.0 * np.tanh(0.5 * theta_s)) - 0.5)
+    elif Vstretching in (2, 3, 4):
+        C = (1.0 - theta_b) * np.sinh(theta_s * s) / np.sinh(theta_s) + \
+            theta_b * (np.tanh(theta_s * (s + 0.5)) / (2.0 * np.tanh(0.5 * theta_s)) - 0.5)
+    elif Vstretching == 5:
+        alpha = 3.0; beta = 0.5
+        Csur = (1.0 - np.cosh(theta_s * s)) / (np.cosh(theta_s) - 1.0)
+        Cbot = (np.exp(theta_b * Csur) - 1.0) / (1.0 - np.exp(-theta_b))
+        C = ((1.0 - np.tanh(alpha * (s + 0.5))) / 2.0) * Cbot + \
+            ((1.0 + np.tanh(alpha * s)) / 2.0) * Csur
+    else:
+        raise ValueError(f"Unsupported Vstretching={Vstretching}")
+    return s, C
+
+
 def _re_search(pattern, string):
     """Regex search shortcut."""
     import re
@@ -293,9 +318,9 @@ def _write_ic_netcdf(fname, h, lon_rho, lat_rho, lon_u, lat_u, lon_v, lat_v,
     ds = xr.Dataset()
     ds.attrs['type'] = 'INITIALIZATION file'
 
-    # Vertical coordinate
-    s_rho, Cs_r = stretching(Vstretching, theta_s, theta_b, N, 0)
-    s_w, Cs_w = stretching(Vstretching, theta_s, theta_b, N, 1)
+    # Stretching (matches reference d_cmems2roms_py.py signature)
+    s_rho, Cs_r = _stretching(Vstretching, theta_s, theta_b, N, 0)
+    s_w, Cs_w = _stretching(Vstretching, theta_s, theta_b, N, 1)
 
     ds['s_rho'] = xr.DataArray(s_rho, dims=['s_rho'],
         attrs={'long_name': 'S-coordinate at RHO-points',
