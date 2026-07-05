@@ -21,7 +21,7 @@ Data_Dir = r'\\DS1825\q1\public_ocean_data\Mercator\2025'
 GRDname = r'E:\Ocean_data\ERA5\romsinput\output\NSCS_grd_operational_adjust.nc'
 
 # Output initial condition file
-INIname = 'roms_ini_20250501.nc'
+INIname = 'roms_ini_20250503.nc'
 
 # CMEMS file names (5 separate files)
 Zfile = f'{Data_Dir}/cmems_zos_202505.nc'      # sea surface height
@@ -62,7 +62,7 @@ if __name__ == '__main__':
         Tcline=25.0,
         N=30,
         time_ref='1990-01-01',   # ROMS time reference
-        init_date='2025-05-01',  # Initial condition date
+        init_date='2025-05-03',  # Initial condition date
         time_index=0             # First time step in CMEMS files
     )
     

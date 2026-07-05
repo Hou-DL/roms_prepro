@@ -653,3 +653,152 @@ def _read_roms_grid(grid_file):
     m['mask_rho'] = m.get('mask_rho', np.ones(m['h'].shape))
     g.close()
     return m
+
+
+# ---------------------------------------------------------------------------
+# CMEMS-specific helpers (regular-grid interpolation)
+# ---------------------------------------------------------------------------
+
+def cmems_read_var(file_path, var_name, time_index=0):
+    """
+    Read a single variable from CMEMS NetCDF, returning data on native grid.
+
+    Returns
+    -------
+    data : ndarray (nlat, nlon) or (nlat, nlon, ndepth)
+    lon_1d : ndarray (nlon,)
+    lat_1d : ndarray (nlat,)
+    depth : ndarray (ndepth,) or None (negative depths for 3D vars)
+    time_units : str or None
+    """
+    ds = nc4.Dataset(file_path, 'r')
+
+    lon_name = next((n for n in ['longitude', 'lon', 'nav_lon'] if n in ds.dimensions), None)
+    lat_name = next((n for n in ['latitude', 'lat', 'nav_lat'] if n in ds.dimensions), None)
+    depth_name = next((n for n in ['depth', 'lev', 'deptht'] if n in ds.dimensions), None)
+    time_name = next((n for n in ['time', 'time_counter', 't'] if n in ds.dimensions), None)
+
+    lon_1d = np.asarray(ds.variables[lon_name][:], dtype=float) if lon_name else None
+    lat_1d = np.asarray(ds.variables[lat_name][:], dtype=float) if lat_name else None
+
+    if var_name not in ds.variables:
+        aliases = {
+            'zos': ['zos', 'sla', 'adt', 'ssh', 'surf_el'],
+            'thetao': ['thetao', 't', 'temperature', 'votemper'],
+            'so': ['so', 's', 'salinity', 'vosaline'],
+            'uo': ['uo', 'u', 'water_u', 'vozocrtx'],
+            'vo': ['vo', 'v', 'water_v', 'vomecrty'],
+        }
+        for aliases_list in aliases.values():
+            if var_name in aliases_list:
+                for alias in aliases_list:
+                    if alias in ds.variables:
+                        var_name = alias
+                        break
+                break
+
+    v = ds.variables[var_name]
+    var_dims = v.dimensions
+    has_time = (time_name and time_name in var_dims and len(var_dims) >= 3)
+    if has_time and v.shape[0] > 1:
+        data = np.array(v[min(time_index, v.shape[0] - 1)], dtype=float)
+    else:
+        data = np.array(v[:], dtype=float)
+
+    fv = getattr(v, '_FillValue', None)
+    if fv is not None:
+        data[data == fv] = np.nan
+    sf = getattr(v, 'scale_factor', None)
+    soff = getattr(v, 'add_offset', None)
+    if sf is not None:
+        data = data * (sf if sf != 0 else 1.0) + (soff if soff is not None else 0.0)
+
+    depth = None
+    if depth_name and depth_name in ds.variables:
+        depth = -np.abs(np.asarray(ds.variables[depth_name][:], dtype=float))
+
+    time_units = None
+    if time_name and time_name in ds.variables:
+        time_units = getattr(ds.variables[time_name], 'units', None)
+
+    ds.close()
+    return data, lon_1d, lat_1d, depth, time_units
+
+
+def cmems_interp_2d(data, lon_1d, lat_1d, lon_rho, lat_rho):
+    """Interpolate 2D CMEMS field to ROMS grid using RegularGridInterpolator."""
+    lat_s, lon_s = lat_1d.copy(), lon_1d.copy()
+    d = data.copy()
+    if lat_s[0] > lat_s[-1]:
+        lat_s = lat_s[::-1]
+        d = d[::-1, :]
+    if lon_s[0] > lon_s[-1]:
+        lon_s = lon_s[::-1]
+        d = d[:, ::-1]
+
+    interp = RegularGridInterpolator(
+        (lat_s, lon_s), d,
+        method='linear', bounds_error=False, fill_value=np.nan)
+    return interp((lat_rho, lon_rho))
+
+
+def cmems_interp_3d(data, lon_1d, lat_1d, depth_vals, lon_rho, lat_rho, z_r):
+    """Interpolate 3D CMEMS field: horizontal per layer, vertical per point."""
+    nlat_r, nlon_r, N = z_r.shape
+    ndepth_src = data.shape[2]
+
+    Flev = np.full((nlat_r, nlon_r, ndepth_src), np.nan)
+    for k in range(ndepth_src):
+        Flev[:, :, k] = cmems_interp_2d(data[:, :, k], lon_1d, lat_1d, lon_rho, lat_rho)
+
+    Fout = np.full((nlat_r, nlon_r, N), np.nan)
+    for i in range(nlat_r):
+        for j in range(nlon_r):
+            src = Flev[i, j, :]
+            valid = ~np.isnan(src)
+            if np.sum(valid) < 2:
+                continue
+            src_z = depth_vals[valid]
+            src_v = src[valid]
+            target_z = z_r[i, j, :]
+            target_z_clipped = np.clip(target_z, src_z.min(), src_z.max())
+            Fout[i, j, :] = np.interp(target_z_clipped, src_z, src_v)
+
+    return Fout
+
+
+def cmems_fill_nan_2d(data):
+    """Fill NaN using distance_transform_edt on each layer."""
+    from scipy.ndimage import distance_transform_edt
+    result = data.copy()
+    if result.ndim == 2:
+        nan_mask = np.isnan(result)
+        if nan_mask.any() and not nan_mask.all():
+            _, idx = distance_transform_edt(~nan_mask, return_indices=True)
+            result[nan_mask] = result[idx[0][nan_mask], idx[1][nan_mask]]
+        return result
+    for k in range(result.shape[2]):
+        layer = result[:, :, k]
+        nan_mask = np.isnan(layer)
+        if nan_mask.any() and not nan_mask.all():
+            _, idx = distance_transform_edt(~nan_mask, return_indices=True)
+            layer[nan_mask] = layer[idx[0][nan_mask], idx[1][nan_mask]]
+            result[:, :, k] = layer
+    return result
+
+
+def cmems_fill_nans_vertically(data):
+    """Fill NaN/0 columns vertically with nearest valid neighbor (per column)."""
+    result = data.copy()
+    nlat, nlon, ndepth = result.shape
+    for i in range(nlat):
+        for j in range(nlon):
+            col = result[i, j, :]
+            valid = np.where(~np.isnan(col) & (col != 0))[0]
+            nan_idx = np.where(np.isnan(col) | (col == 0))[0]
+            if len(valid) > 0 and len(nan_idx) > 0:
+                for k in nan_idx:
+                    nearest = valid[np.argmin(np.abs(valid - k))]
+                    col[k] = col[nearest]
+                result[i, j, :] = col
+    return result
