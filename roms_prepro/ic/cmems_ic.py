@@ -1,9 +1,9 @@
 """
-CMEMS → ROMS initial conditions.
+CMEMS -> ROMS initial conditions.
 
 Processing flow (matches reference d_cmems2roms_py.py):
   1. Read CMEMS variables on native grid (one time step)
-  2. Range check → NaN, then fill NaN on CMEMS grid (distance_transform)
+  2. Range check -> NaN, then fill NaN on CMEMS grid (distance_transform)
   3. Trim depth, extend if ROMS deeper than CMEMS
   4. Vertical fill (per-column nearest neighbor)
   5. Compute ocean_time from CMEMS time units
@@ -12,25 +12,26 @@ Processing flow (matches reference d_cmems2roms_py.py):
   8. Rotate velocity to C-grid, compute barotropic
   9. Apply fill_value on land points
   10. Write NetCDF with _FillValue attributes
+
+CMEMS file dates and time references are auto-read from file metadata.
 """
 
 import os
 import numpy as np
-from datetime import datetime, timedelta
 
-from ._core import (_read_roms_grid, _read_cmems_var, _detect_cmems_files,
-                    _compute_ocean_time, _detect_time_units,
-                    fill_nan_2d, fill_nans_vertically,
-                    interp_to_roms, mercator2roms_2d, mercator2roms_3d)
-
-# Import reference functions from bc.roms_tools
-import sys
-_tools_path = os.path.join(os.path.dirname(__file__), '..', 'bc')
-if _tools_path not in sys.path:
-    sys.path.insert(0, _tools_path)
-from roms_tools import stretching, set_depth
-
-FILL_VAL = 1.0e+37
+from ._core import (
+    _read_roms_grid, _read_cmems_var, _detect_cmems_files,
+    _compute_ocean_time, _detect_time_units, _parse_time_units,
+    _resolve_vgrid_params,
+    fill_nan_2d, fill_nans_vertically,
+    stretching, set_depth,
+    interp_to_roms, mercator2roms_2d, mercator2roms_3d,
+    rotate_uv_cgrid, compute_ubar_vbar,
+    _write_ic_netcdf, FILL_VAL,
+    horizontal_interp, z_to_sigma,
+    uv_to_cgrid, rotate_uv, compute_ubar_vbar_legacy,
+    _parse_date, _get_time, _match_idx,
+)
 
 
 def cmems_to_roms_ini(roms_grid_file, zeta_file=None, temp_file=None,
@@ -38,29 +39,54 @@ def cmems_to_roms_ini(roms_grid_file, zeta_file=None, temp_file=None,
                       data_dir=None, ini_file=None,
                       zeta_var='zos', temp_var='thetao', salt_var='so',
                       u_var='uo', v_var='vo',
-                      Vtransform=2, Vstretching=3,
-                      theta_s=2.5, theta_b=1.0, Tcline=25.0, N=30,
-                      time_ref='1990-01-01', init_date='2025-05-01',
-                      time_index=0):
+                      Vtransform=None, Vstretching=None,
+                      theta_s=None, theta_b=None, Tcline=None, N=None,
+                      time_ref='1990-01-01', init_date=None,
+                      time_index=None):
     """
     Create ROMS initial conditions from CMEMS files.
 
     Parameters
     ----------
+    roms_grid_file : str
+        Path to ROMS grid NetCDF file.
+    zeta_file, temp_file, salt_file, u_file, v_file : str, optional
+        Paths to individual CMEMS variable files.
     data_dir : str, optional
-        CMEMS data directory (auto-detect files)
-    init_date : str
-        Date for IC, e.g. '2025-05-01'. Auto-detects time_index from file.
+        CMEMS data directory -- auto-detect files (ignored if individual
+        files are specified).
+    ini_file : str, optional
+        Output IC file path. Default: 'roms_ini_cmems.nc'
+    zeta_var, temp_var, salt_var, u_var, v_var : str
+        CMEMS variable names (or aliases). Auto-resolved.
+    Vtransform, Vstretching, theta_s, theta_b, Tcline, N
+        ROMS vertical grid parameters.
     time_ref : str, optional
-        ROMS time reference date, e.g. '1990-01-01'. Auto-detected if None.
-    """
-    print('\nReading CMEMS data ...\n')
+        ROMS time reference date, e.g. '1990-01-01'.
+    init_date : str, optional
+        Date for the initial condition, e.g. '2025-05-01'.
+        If not provided, uses the first time step.
+    time_index : int, optional
+        Explicit time index. Overrides init_date auto-detection.
 
-    # Auto-detect files
+    Returns
+    -------
+    dict with keys: zeta, temp, salt, u, v, ubar, vbar
+    """
+    print('=' * 60)
+    print('CMEMS -> ROMS Initial Condition')
+    print('=' * 60)
+
+    # ---- Resolve output file ----
+    if ini_file is None:
+        ini_file = 'roms_ini_cmems.nc'
+
+    # ---- Auto-detect CMEMS files ----
+    print('\n[1] Locating CMEMS data ...')
     if data_dir and not all([zeta_file, temp_file, salt_file, u_file, v_file]):
         detected = _detect_cmems_files(data_dir)
         if not detected:
-            raise FileNotFoundError(f'No CMEMS files in {data_dir}')
+            raise FileNotFoundError(f'No CMEMS files found in {data_dir}')
         zeta_file = zeta_file or detected.get('zos')
         temp_file = temp_file or detected.get('thetao')
         salt_file = salt_file or detected.get('so')
@@ -75,155 +101,200 @@ def cmems_to_roms_ini(roms_grid_file, zeta_file=None, temp_file=None,
         if path and not os.path.isfile(path):
             raise FileNotFoundError(f'{name} file not found: {path}')
 
-    # Read ROMS grid (using bc.roms_tools convention)
+    # ---- Read ROMS grid ----
+    print('\n[2] Reading ROMS grid ...')
     import netCDF4 as nc
     ds = nc.Dataset(roms_grid_file)
-    h = np.array(ds.variables['h'][:], dtype=float)
-    lon_rho = np.array(ds.variables['lon_rho'][:], dtype=float)
-    lat_rho = np.array(ds.variables['lat_rho'][:], dtype=float)
-    lon_u = np.array(ds.variables['lon_u'][:], dtype=float)
-    lat_u = np.array(ds.variables['lat_u'][:], dtype=float)
-    lon_v = np.array(ds.variables['lon_v'][:], dtype=float)
-    lat_v = np.array(ds.variables['lat_v'][:], dtype=float)
-    mask_rho = np.array(ds.variables['mask_rho'][:], dtype=float)
-    mask_u = np.array(ds.variables['mask_u'][:], dtype=float)
-    mask_v = np.array(ds.variables['mask_v'][:], dtype=float)
-    angle = np.array(ds.variables['angle'][:], dtype=float)
+    h         = np.array(ds.variables['h'][:], dtype=float)
+    lon_rho   = np.array(ds.variables['lon_rho'][:], dtype=float)
+    lat_rho   = np.array(ds.variables['lat_rho'][:], dtype=float)
+    lon_u     = np.array(ds.variables['lon_u'][:], dtype=float)
+    lat_u     = np.array(ds.variables['lat_u'][:], dtype=float)
+    lon_v     = np.array(ds.variables['lon_v'][:], dtype=float)
+    lat_v     = np.array(ds.variables['lat_v'][:], dtype=float)
+    mask_rho  = np.array(ds.variables['mask_rho'][:], dtype=float)
+    mask_u    = np.array(ds.variables['mask_u'][:], dtype=float)
+    mask_v    = np.array(ds.variables['mask_v'][:], dtype=float)
+    angle     = np.array(ds.variables['angle'][:], dtype=float)
     ds.close()
+
+    # ---- Resolve vertical grid params (read from grid if not user-specified) ----
+    _vgrid = _resolve_vgrid_params(roms_grid_file, Vtransform, Vstretching,
+                                    theta_s, theta_b, Tcline, N)
+    Vtransform = _vgrid['Vtransform']
+    Vstretching = _vgrid['Vstretching']
+    Vstretching = _vgrid['Vstretching']
+    theta_s = _vgrid['theta_s']
+    theta_b = _vgrid['theta_b']
+    Tcline = _vgrid['Tcline']
+    hc = _vgrid['hc']
+    N = _vgrid['N']
+    for _pn, _pv in _vgrid.items():
+        print(f'  {_pn} = {_pv}')
 
     nlat, nlon = h.shape
     print(f'  Grid: {nlat} x {nlon}')
 
-    # Auto-detect time_ref and time_index from init_date
-    if time_ref is None or init_date is not None:
-        time_units, time_values = _detect_time_units(temp_file)
-        if time_units:
-            idx = _match_time_idx(time_units, time_values, init_date)
-            time_index = idx
-            m = _re_search(r'since\s+([\d\-]+\s*[\d:]*)', time_units)
-            if m:
-                ref_str = m.group(1).strip()
-                try:
-                    ref_dt = datetime.strptime(ref_str, '%Y-%m-%d %H:%M:%S')
-                except ValueError:
-                    ref_dt = datetime.strptime(ref_str, '%Y-%m-%d')
-                time_ref = ref_dt.strftime('%Y-%m-%d')
-                print(f'  init_date={init_date} -> time_index {time_index}')
-                print(f'  Time reference: {time_ref}')
+    # ---- Auto-detect time_ref from CMEMS files ----
+    if time_ref is None:
+        for fp in [temp_file, zeta_file, salt_file, u_file, v_file]:
+            if fp:
+                tu, tv = _detect_time_units(fp)
+                if tu:
+                    _, epoch = _parse_time_units(tu)
+                    if epoch:
+                        time_ref = epoch.strftime('%Y-%m-%d')
+                        print(f'  Auto-detected time_ref from CMEMS: {time_ref}')
+                        break
+        if time_ref is None:
+            time_ref = '1990-01-01'
 
-    # Read CMEMS data (native grid, one time step)
-    Zeta, Zlon, Zlat, _, _ = _read_cmems_var(zeta_file, zeta_var, time_index)
-    Temp, Tlon, Tlat, Tdepth, _ = _read_cmems_var(temp_file, temp_var, time_index)
-    Salt, _, _, _, _ = _read_cmems_var(salt_file, salt_var, time_index)
-    Uvel, Ulon, Ulat, Udepth, _ = _read_cmems_var(u_file, u_var, time_index)
-    Vvel, _, _, Vdepth, _ = _read_cmems_var(v_file, v_var, time_index)
+    # ---- Read CMEMS data ----
+    print('\n[3] Reading CMEMS data ...')
 
-    # Transpose to (lat, lon, depth) for consistent processing
-    Temp = np.ascontiguousarray(np.transpose(Temp, (1, 2, 0)))
-    Salt = np.ascontiguousarray(np.transpose(Salt, (1, 2, 0)))
-    Uvel = np.ascontiguousarray(np.transpose(Uvel, (1, 2, 0)))
-    Vvel = np.ascontiguousarray(np.transpose(Vvel, (1, 2, 0)))
+    Zeta_data, Zlon, Zlat, _, ztime_info     = _read_cmems_var(zeta_file, zeta_var, 0)
+    Temp_data, Tlon, Tlat, Tdepth, ttime_info = _read_cmems_var(temp_file, temp_var, 0)
+    Salt_data, _,    _,    _,      _         = _read_cmems_var(salt_file, salt_var, 0)
+    Uvel_data, Ulon, Ulat, Udepth, utime_info = _read_cmems_var(u_file, u_var, 0)
+    Vvel_data, _,    _,    Vdepth, _         = _read_cmems_var(v_file, v_var, 0)
 
-    print(f'  Data shapes: Zeta={Zeta.shape}, Temp={Temp.shape}')
-    print(f'  CMEMS depths: T={len(Tdepth)}, U={len(Udepth)}, V={len(Vdepth)}')
+    # Resolve time index
+    if time_index is not None:
+        tidx = time_index
+    elif init_date is not None:
+        tu, tv = ttime_info
+        if tu is not None and tv is not None:
+            _, tidx = _compute_ocean_time(ttime_info, init_date, time_ref)
+        else:
+            tidx = 0
+        print(f'  init_date={init_date} -> time_index={tidx}')
+    else:
+        tidx = 0
 
-    # === Step 1: Range check + NaN fill on CMEMS grid ===
-    print('\nFilling invalid values ...')
-    Temp[np.abs(Temp) > 50] = np.nan;   Temp[Temp < -100] = np.nan
-    Salt[Salt < 0] = np.nan;            Salt[Salt > 50] = np.nan;  Salt[np.abs(Salt) > 100] = np.nan
-    Uvel[np.abs(Uvel) > 100] = np.nan
-    Vvel[np.abs(Vvel) > 100] = np.nan
-    Zeta[np.abs(Zeta) > 100] = np.nan
+    # Re-read with correct time index if needed
+    if tidx != 0:
+        Zeta_data, _, _, _, _       = _read_cmems_var(zeta_file, zeta_var, tidx)
+        Temp_data, _, _, Tdepth, _  = _read_cmems_var(temp_file, temp_var, tidx)
+        Salt_data, _, _, _, _       = _read_cmems_var(salt_file, salt_var, tidx)
+        Uvel_data, _, _, Udepth, _  = _read_cmems_var(u_file, u_var, tidx)
+        Vvel_data, _, _, Vdepth, _  = _read_cmems_var(v_file, v_var, tidx)
 
-    Temp = fill_nan_2d(Temp)
-    Salt = fill_nan_2d(Salt)
-    Uvel = fill_nan_2d(Uvel)
-    Vvel = fill_nan_2d(Vvel)
-    Zeta = fill_nan_2d(Zeta)
+    # _read_cmems_var returns (lat, lon) or (lat, lon, depth) order
+    print(f'  Data shapes: Zeta={Zeta_data.shape}, Temp={Temp_data.shape}')
+    print(f'  CMEMS depths: T={len(Tdepth) if Tdepth is not None else 0}, '
+          f'U={len(Udepth) if Udepth is not None else 0}, '
+          f'V={len(Vdepth) if Vdepth is not None else 0}')
 
-    # === Step 2: Process depth ===
+    # ---- Compute ocean_time ----
+    ocean_time, _ = _compute_ocean_time(ttime_info, init_date, time_ref)
+    print(f'\n  ocean_time: {ocean_time:.0f} s  (ref: {time_ref})')
+
+    # ---- Depth processing ----
+    if Tdepth is None:
+        Tdepth = np.array([5000.0])
+    if Udepth is None:
+        Udepth = Tdepth.copy()
+    if Vdepth is None:
+        Vdepth = Tdepth.copy()
+
     Tdepth = np.unique(Tdepth[Tdepth > 0])
     Udepth = np.unique(Udepth[Udepth > 0])
     Vdepth = np.unique(Vdepth[Vdepth > 0])
 
-    hmax = h.max()
-    print(f'  CMEMS max depth: {Tdepth[-1]:.0f}m, ROMS max: {hmax:.0f}m')
+    # ---- Step 1: Range check + NaN fill on CMEMS grid ----
+    print('\n[4] Filling invalid values ...')
+    Temp_data[np.abs(Temp_data) > 50] = np.nan
+    Temp_data[Temp_data < -100] = np.nan
+    Salt_data[Salt_data < 0] = np.nan
+    Salt_data[Salt_data > 50] = np.nan
+    Salt_data[np.abs(Salt_data) > 100] = np.nan
+    Uvel_data[np.abs(Uvel_data) > 100] = np.nan
+    Vvel_data[np.abs(Vvel_data) > 100] = np.nan
+    Zeta_data[np.abs(Zeta_data) > 100] = np.nan
 
-    # Extend depth if ROMS deeper
+    Temp_data = fill_nan_2d(Temp_data)
+    Salt_data = fill_nan_2d(Salt_data)
+    Uvel_data = fill_nan_2d(Uvel_data)
+    Vvel_data = fill_nan_2d(Vvel_data)
+    Zeta_data = fill_nan_2d(Zeta_data)
+
+    # ---- Step 2: Extend depth if ROMS deeper than CMEMS ----
+    hmax = h.max()
+    print(f'  CMEMS max depth: {Tdepth[-1]:.0f}m, ROMS max depth: {hmax:.0f}m')
+
     if Tdepth[-1] < hmax:
         Tdepth = np.append(Tdepth, [Tdepth[-1] + 200, hmax + 200])
-        Temp = np.concatenate([Temp, Temp[:, :, -1:], Temp[:, :, -1:]], axis=2)
-        Salt = np.concatenate([Salt, Salt[:, :, -1:], Salt[:, :, -1:]], axis=2)
+        Temp_data = np.concatenate([Temp_data, Temp_data[:, :, -1:],
+                                    Temp_data[:, :, -1:]], axis=2)
+        Salt_data = np.concatenate([Salt_data, Salt_data[:, :, -1:],
+                                    Salt_data[:, :, -1:]], axis=2)
         Udepth = np.append(Udepth, [Udepth[-1] + 200, hmax + 200])
         Vdepth = np.append(Vdepth, [Vdepth[-1] + 200, hmax + 200])
-        Uvel = np.concatenate([Uvel, np.zeros_like(Uvel[:, :, -1:]), np.zeros_like(Uvel[:, :, -1:])], axis=2)
-        Vvel = np.concatenate([Vvel, np.zeros_like(Vvel[:, :, -1:]), np.zeros_like(Vvel[:, :, -1:])], axis=2)
+        Uvel_data = np.concatenate([Uvel_data, np.zeros_like(Uvel_data[:, :, -1:]),
+                                    np.zeros_like(Uvel_data[:, :, -1:])], axis=2)
+        Vvel_data = np.concatenate([Vvel_data, np.zeros_like(Vvel_data[:, :, -1:]),
+                                    np.zeros_like(Vvel_data[:, :, -1:])], axis=2)
 
     # Trim to depth
-    Temp = Temp[:, :, :len(Tdepth)]
-    Salt = Salt[:, :, :len(Tdepth)]
-    Uvel = Uvel[:, :, :len(Udepth)]
-    Vvel = Vvel[:, :, :len(Vdepth)]
+    Temp_data = Temp_data[:, :, :len(Tdepth)]
+    Salt_data = Salt_data[:, :, :len(Tdepth)]
+    Uvel_data = Uvel_data[:, :, :len(Udepth)]
+    Vvel_data = Vvel_data[:, :, :len(Vdepth)]
 
     # Vertical fill
     print('  Filling NaN vertically ...')
-    Temp = fill_nans_vertically(Temp)
-    Salt = fill_nans_vertically(Salt)
-    Uvel = fill_nans_vertically(Uvel)
-    Vvel = fill_nans_vertically(Vvel)
+    Temp_data = fill_nans_vertically(Temp_data)
+    Salt_data = fill_nans_vertically(Salt_data)
+    Uvel_data = fill_nans_vertically(Uvel_data)
+    Vvel_data = fill_nans_vertically(Vvel_data)
 
-    print(f'  After fill: Temp [{np.nanmin(Temp):.2f}, {np.nanmax(Temp):.2f}]')
+    print(f'  After fill: Temp [{np.nanmin(Temp_data):.2f}, {np.nanmax(Temp_data):.2f}]')
 
-    # === Step 3: Compute ocean_time ===
-    time_units, time_values = _detect_time_units(temp_file)
-    ocean_time = _compute_ocean_time(time_units, time_values, init_date, time_ref)
-    print(f'\n  ocean_time: {ocean_time:.0f} s')
+    # ---- Step 3: Interpolation to ROMS grid ----
+    print('\n[5] Interpolating to ROMS grid ...')
 
-    # === Step 4: Interpolation ===
-    print('\nInterpolating to ROMS grid ...')
+    # Use zeta lon/lat for all variables (CMEMS should use same grid)
+    if Zlon is not None and Zlat is not None:
+        clon, clat = Zlon, Zlat
+    elif Tlon is not None:
+        clon, clat = Tlon, Tlat
+    else:
+        clon, clat = Ulon, Ulat
 
-    zeta = mercator2roms_2d(Zeta, Tlon, Tlat, lon_rho, lat_rho)
+    zeta = mercator2roms_2d(Zeta_data, clon, clat, lon_rho, lat_rho)
     print(f'  zeta: [{np.nanmin(zeta):.3f}, {np.nanmax(zeta):.3f}]')
 
-    # ROMS sigma depths (using bc.roms_tools.set_depth)
+    # ROMS sigma depths
     ssh = np.zeros_like(zeta)
     z_r = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, 1, h, ssh)
-    z_u = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, 3, h, ssh)
-    z_v = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, 4, h, ssh)
     z_w = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, 5, h, zeta)
-    Hz = z_w[:, :, 1:N+1] - z_w[:, :, 0:N]
+    Hz = z_w[:, :, 1:N + 1] - z_w[:, :, 0:N]
 
     # 3D interpolation
     print('  Interpolating temp ...')
-    temp = mercator2roms_3d(Temp, Tlon, Tlat, -Tdepth, lon_rho, lat_rho, z_r)
+    temp = mercator2roms_3d(Temp_data, clon, clat, -Tdepth, lon_rho, lat_rho, z_r)
     print('  Interpolating salt ...')
-    salt = mercator2roms_3d(Salt, Tlon, Tlat, -Tdepth, lon_rho, lat_rho, z_r)
+    salt = mercator2roms_3d(Salt_data, clon, clat, -Tdepth, lon_rho, lat_rho, z_r)
     print('  Interpolating u ...')
-    Urho = mercator2roms_3d(Uvel, Ulon, Ulat, -Udepth, lon_rho, lat_rho, z_r)
+    Urho = mercator2roms_3d(Uvel_data,
+                             Ulon if Ulon is not None else clon,
+                             Ulat if Ulat is not None else clat,
+                             -Udepth, lon_rho, lat_rho, z_r)
     print('  Interpolating v ...')
-    Vrho = mercator2roms_3d(Vvel, Ulon, Ulat, -Vdepth, lon_rho, lat_rho, z_r)
+    Vrho = mercator2roms_3d(Vvel_data,
+                             Ulon if Ulon is not None else clon,
+                             Ulat if Ulat is not None else clat,
+                             -Vdepth, lon_rho, lat_rho, z_r)
 
     print(f'  Temp: [{np.nanmin(temp):.2f}, {np.nanmax(temp):.2f}]')
     print(f'  Salt: [{np.nanmin(salt):.2f}, {np.nanmax(salt):.2f}]')
 
-    # === Step 5: Velocity rotation + C-grid + barotropic ===
-    print('\nRotating velocity ...')
-    angle_3d = angle[:, :, np.newaxis]
-    Urot = Urho * np.cos(angle_3d) + Vrho * np.sin(angle_3d)
-    Vrot = Vrho * np.cos(angle_3d) - Urho * np.sin(angle_3d)
-    u = 0.5 * (Urot[:, :-1, :] + Urot[:, 1:, :])
-    v = 0.5 * (Vrot[:-1, :, :] + Vrot[1:, :, :])
+    # ---- Step 4: Velocity rotation + C-grid + barotropic ----
+    print('\n[6] Rotating velocity ...')
+    u, v = rotate_uv_cgrid(Urho, Vrho, angle)
+    ubar, vbar = compute_ubar_vbar(u, v, Hz)
 
-    Hz_u = 0.5 * (Hz[:, :-1, :] + Hz[:, 1:, :])
-    Hz_v = 0.5 * (Hz[:-1, :, :] + Hz[1:, :, :])
-    sum_Hz_u = np.sum(Hz_u, axis=2)
-    sum_Hz_v = np.sum(Hz_v, axis=2)
-    sum_Hz_u[sum_Hz_u == 0] = 1
-    sum_Hz_v[sum_Hz_v == 0] = 1
-    ubar = np.sum(u * Hz_u, axis=2) / sum_Hz_u
-    vbar = np.sum(v * Hz_v, axis=2) / sum_Hz_v
-
-    # === Step 6: Land masks ===
+    # ---- Step 5: Land masks ----
     print('Applying masks ...')
     temp[mask_rho == 0] = FILL_VAL
     salt[mask_rho == 0] = FILL_VAL
@@ -235,220 +306,143 @@ def cmems_to_roms_ini(roms_grid_file, zeta_file=None, temp_file=None,
 
     print(f'  Water temp: [{temp[mask_rho == 1].min():.2f}, {temp[mask_rho == 1].max():.2f}]')
 
-    # === Step 7: Write NetCDF ===
-    print('\nWriting NetCDF ...')
+    # ---- Step 6: Write NetCDF ----
+    print('\n[7] Writing NetCDF ...')
     _write_ic_netcdf(ini_file, h, lon_rho, lat_rho, lon_u, lat_u, lon_v, lat_v,
                      ocean_time, theta_s, theta_b, Tcline, Tcline,
-                     N, zeta, ubar, vbar, u, v, temp, salt, Vtransform, Vstretching)
+                     N, zeta, ubar, vbar, u, v, temp, salt,
+                     Vtransform, Vstretching, time_ref)
 
     print('=' * 60)
-    print('Done!')
+    print(f'Done!  Output: {ini_file}')
+    print('=' * 60)
     return {'zeta': zeta, 'temp': temp, 'salt': salt, 'u': u, 'v': v,
             'ubar': ubar, 'vbar': vbar}
 
 
-def _stretching(Vstretching, theta_s, theta_b, N, kgrid):
-    """ROMS vertical stretching function (matches reference signature)."""
-    ds = 1.0 / N
-    if kgrid == 0:
-        s = (np.arange(1, N + 1) - 0.5) * ds - 1.0
-    else:
-        s = np.arange(0, N + 1) * ds - 1.0
-
-    if Vstretching == 1:
-        C = (1.0 - theta_b) * np.sinh(theta_s * s) / np.sinh(theta_s) + \
-            theta_b * (np.tanh(theta_s * (s + 0.5)) / (2.0 * np.tanh(0.5 * theta_s)) - 0.5)
-    elif Vstretching in (2, 3, 4):
-        C = (1.0 - theta_b) * np.sinh(theta_s * s) / np.sinh(theta_s) + \
-            theta_b * (np.tanh(theta_s * (s + 0.5)) / (2.0 * np.tanh(0.5 * theta_s)) - 0.5)
-    elif Vstretching == 5:
-        alpha = 3.0; beta = 0.5
-        Csur = (1.0 - np.cosh(theta_s * s)) / (np.cosh(theta_s) - 1.0)
-        Cbot = (np.exp(theta_b * Csur) - 1.0) / (1.0 - np.exp(-theta_b))
-        C = ((1.0 - np.tanh(alpha * (s + 0.5))) / 2.0) * Cbot + \
-            ((1.0 + np.tanh(alpha * s)) / 2.0) * Csur
-    else:
-        raise ValueError(f"Unsupported Vstretching={Vstretching}")
-    return s, C
-
-
-def _re_search(pattern, string):
-    """Regex search shortcut."""
-    import re
-    return re.search(pattern, string)
-
-
-def _match_time_idx(time_units, time_values, init_date):
-    """Find time index closest to init_date."""
-    if init_date is None or time_values is None:
-        return 0
-    m = _re_search(r'since\s+([\d\-]+\s*[\d:]*)', time_units)
-    if not m:
-        return 0
-    ref_str = m.group(1).strip()
-    try:
-        ref_dt = datetime.strptime(ref_str, '%Y-%m-%d %H:%M:%S')
-    except ValueError:
-        ref_dt = datetime.strptime(ref_str, '%Y-%m-%d')
-
-    if 'day' in time_units.lower():
-        time_seconds = time_values * 86400.0
-    elif 'hour' in time_units.lower():
-        time_seconds = time_values * 3600.0
-    else:
-        time_seconds = time_values
-
-    time_dates = [ref_dt + timedelta(seconds=float(s)) for s in time_seconds]
-    init_dt = datetime.strptime(init_date, '%Y-%m-%d')
-    return min(range(len(time_dates)),
-               key=lambda i: abs((time_dates[i] - init_dt).total_seconds()))
-
-
-def _write_ic_netcdf(fname, h, lon_rho, lat_rho, lon_u, lat_u, lon_v, lat_v,
-                     ocean_time, theta_s, theta_b, Tcline, hc,
-                     N, zeta, ubar, vbar, u, v, temp, salt,
-                     Vtransform, Vstretching):
-    """Write ROMS IC NetCDF using xarray with _FillValue."""
-    import xarray as xr
-
-    nlat, nlon = h.shape
-    if os.path.exists(fname):
-        os.remove(fname)
-
-    ds = xr.Dataset()
-    ds.attrs['type'] = 'INITIALIZATION file'
-
-    # Stretching (matches reference d_cmems2roms_py.py signature)
-    s_rho, Cs_r = _stretching(Vstretching, theta_s, theta_b, N, 0)
-    s_w, Cs_w = _stretching(Vstretching, theta_s, theta_b, N, 1)
-
-    ds['s_rho'] = xr.DataArray(s_rho, dims=['s_rho'],
-        attrs={'long_name': 'S-coordinate at RHO-points',
-               'valid_min': -1.0, 'valid_max': 0.0, 'positive': 'up'})
-    ds['s_w'] = xr.DataArray(s_w, dims=['s_w'],
-        attrs={'long_name': 'S-coordinate at W-points',
-               'valid_min': -1.0, 'valid_max': 0.0, 'positive': 'up'})
-    ds['Cs_r'] = xr.DataArray(Cs_r, dims=['s_rho'],
-        attrs={'long_name': 'S-coordinate stretching curves at RHO-points'})
-    ds['Cs_w'] = xr.DataArray(Cs_w, dims=['s_w'],
-        attrs={'long_name': 'S-coordinate stretching curves at W-points'})
-
-    # Grid
-    ds['h'] = xr.DataArray(h, dims=['eta_rho', 'xi_rho'])
-    ds['lon_rho'] = xr.DataArray(lon_rho, dims=['eta_rho', 'xi_rho'])
-    ds['lat_rho'] = xr.DataArray(lat_rho, dims=['eta_rho', 'xi_rho'])
-    ds['lon_u'] = xr.DataArray(lon_u, dims=['eta_u', 'xi_u'])
-    ds['lat_u'] = xr.DataArray(lat_u, dims=['eta_u', 'xi_u'])
-    ds['lon_v'] = xr.DataArray(lon_v, dims=['eta_v', 'xi_v'])
-    ds['lat_v'] = xr.DataArray(lat_v, dims=['eta_v', 'xi_v'])
-
-    # Time
-    ds['ocean_time'] = xr.DataArray([ocean_time], dims=['ocean_time'],
-        attrs={'long_name': 'time since initialization',
-               'units': 'seconds since 1990-01-01 00:00:00',
-               'calendar': 'gregorian'})
-
-    def add_var(name, data, dims, long_name, units):
-        ds[name] = xr.DataArray(data[np.newaxis, ...].astype('f4'),
-            dims=['ocean_time'] + list(dims),
-            attrs={'long_name': long_name, 'units': units,
-                   'field': f'{name}, scalar, series', 'coordinates': 'lon lat',
-                   '_FillValue': np.float32(FILL_VAL)})
-
-    add_var('zeta', zeta, ('eta_rho', 'xi_rho'), 'free-surface', 'meter')
-    add_var('ubar', ubar, ('eta_u', 'xi_u'),
-            'vertically integrated u-momentum', 'meter second-1')
-    add_var('vbar', vbar, ('eta_v', 'xi_v'),
-            'vertically integrated v-momentum', 'meter second-1')
-    add_var('temp', temp, ('eta_rho', 'xi_rho', 's_rho'),
-            'potential temperature', 'Celsius')
-    add_var('salt', salt, ('eta_rho', 'xi_rho', 's_rho'), 'salinity', 'PSU')
-    add_var('u', u, ('eta_u', 'xi_u', 's_rho'),
-            'u-momentum component', 'meter second-1')
-    add_var('v', v, ('eta_v', 'xi_v', 's_rho'),
-            'v-momentum component', 'meter second-1')
-
-    # Write with h5netcdf (handles Chinese paths) or fall back to netcdf4
-    try:
-        ds.to_netcdf(fname, engine='h5netcdf')
-    except (ImportError, ModuleNotFoundError):
-        ds.to_netcdf(fname, engine='netcdf4')
-    ds.close()
-
-
 def mercator_to_roms_ini(roms_grid_file, source_file, ini_file,
-                         Vtransform=2, Vstretching=4,
-                         theta_s=7.0, theta_b=0.1, Tcline=20.0, N=30,
+                         Vtransform=None, Vstretching=None,
+                         theta_s=None, theta_b=None, Tcline=None, N=None,
                          init_date=None, time_ref=None,
                          **source_kwargs):
     """Create ROMS IC from a single multi-variable file (Mercator/HYCOM)."""
-    # Import from the old _core for single-file processing
-    from ._core_old import (horizontal_interp, z_to_sigma, rotate_uv,
-                            uv_to_cgrid, compute_ubar_vbar, write_ic_file,
-                            _fill_nan, _parse_date, _get_time, _match_idx,
-                            _read_source, _read_roms_grid)
+
+    def _read_source(path, time_index=0):
+        """Read all variables from a single source file."""
+        zeta, lon_z, lat_z, _, _    = _read_cmems_var(path, 'zos', time_index)
+        temp, lon_t, lat_t, depths, tinfo = _read_cmems_var(path, 'thetao', time_index)
+        salt, _, _, _, _            = _read_cmems_var(path, 'so', time_index)
+        u, _, _, _, _               = _read_cmems_var(path, 'uo', time_index)
+        v, _, _, _, _               = _read_cmems_var(path, 'vo', time_index)
+
+        return {
+            'zeta': zeta,
+            'temp': temp,
+            'salt': salt,
+            'u': u,
+            'v': v,
+            'lon_1d': lon_t,
+            'lat_1d': lat_t,
+            'depth': depths,
+            'time_info': tinfo,
+        }
+
+    from ._core import _parse_date, _get_time, _match_idx, _fill_nan_single, _resolve_vgrid_params
 
     metrics = _read_roms_grid(roms_grid_file)
 
+    # Resolve vertical grid params
+    _vgrid = _resolve_vgrid_params(roms_grid_file, Vtransform, Vstretching,
+                                    theta_s, theta_b, Tcline, N)
+    Vtransform = _vgrid['Vtransform']
+    Vstretching = _vgrid['Vstretching']
+    theta_s = _vgrid['theta_s']
+    theta_b = _vgrid['theta_b']
+    Tcline = _vgrid['Tcline']
+    hc = _vgrid['hc']
+    N = _vgrid['N']
+
+    # Time matching
     src_time = _get_time(source_file, source_kwargs.get('time_var'))
     if init_date is not None and src_time is not None:
         idx = _match_idx(src_time, init_date)
     else:
         idx = 0
 
-    src = _read_source(source_file, time_index=idx, **source_kwargs)
+    # Read source
+    src = _read_source(source_file, time_index=idx)
     h = metrics['h']
     mask = metrics['mask_rho']
-    z_r = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, 1, h, np.zeros_like(h))
-    spval = 1e37
 
+    # ROMS sigma depths
+    z_r = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, 1, h, np.zeros_like(h))
+    spval = FILL_VAL
+
+    # Horizontal interpolation -> ROMS grid
     zeta = horizontal_interp(src['lon_1d'], src['lat_1d'], src['zeta'],
                               metrics['lon_rho'], metrics['lat_rho'],
                               mask=mask, fill_value=0.0)
     zeta = np.nan_to_num(zeta, nan=0.0)
-    temp_h = horizontal_interp(src['lon_1d'], src['lat_1d'], src['temp'],
+
+    # 3D: src is (lat, lon, depth); legacy horiz interp expects (depth, lat, lon)
+    temp_t = src['temp'].transpose(2, 0, 1) if src['temp'].ndim == 3 else src['temp']
+    salt_t = src['salt'].transpose(2, 0, 1) if src['salt'].ndim == 3 else src['salt']
+    u_t = src['u'].transpose(2, 0, 1) if src['u'].ndim == 3 else src['u']
+    v_t = src['v'].transpose(2, 0, 1) if src['v'].ndim == 3 else src['v']
+
+    temp_h = horizontal_interp(src['lon_1d'], src['lat_1d'], temp_t,
                                 metrics['lon_rho'], metrics['lat_rho'])
-    salt_h = horizontal_interp(src['lon_1d'], src['lat_1d'], src['salt'],
+    salt_h = horizontal_interp(src['lon_1d'], src['lat_1d'], salt_t,
                                 metrics['lon_rho'], metrics['lat_rho'])
-    u_h = horizontal_interp(src['lon_1d'], src['lat_1d'], src['u'],
+    u_h = horizontal_interp(src['lon_1d'], src['lat_1d'], u_t,
                              metrics['lon_rho'], metrics['lat_rho'])
-    v_h = horizontal_interp(src['lon_1d'], src['lat_1d'], src['v'],
+    v_h = horizontal_interp(src['lon_1d'], src['lat_1d'], v_t,
                              metrics['lon_rho'], metrics['lat_rho'])
 
-    temp_h = _fill_nan(temp_h)
-    salt_h = _fill_nan(salt_h)
-    u_h = _fill_nan(u_h)
-    v_h = _fill_nan(v_h)
+    # NaN fill
+    temp_h = np.nan_to_num(temp_h, nan=0.0)
+    salt_h = np.nan_to_num(salt_h, nan=0.0)
+    u_h = np.nan_to_num(u_h, nan=0.0)
+    v_h = np.nan_to_num(v_h, nan=0.0)
 
-    # Need to convert z_r from (eta, xi, N) to (N, eta, xi) for z_to_sigma
-    z_r_t = z_r.transpose(2, 0, 1)  # (N, eta, xi)
+    # Vertical interpolation: source depths -> ROMS sigma
     src_depth = src['depth']
+    z_r_t = z_r.transpose(2, 0, 1)  # (N, nlat, nlon) for legacy interpy
 
     temp = z_to_sigma(temp_h, src_depth, z_r_t, fill_value=spval)
     salt = z_to_sigma(salt_h, src_depth, z_r_t, fill_value=spval)
     u_rho = z_to_sigma(u_h, src_depth, z_r_t, fill_value=spval)
     v_rho = z_to_sigma(v_h, src_depth, z_r_t, fill_value=spval)
 
+    # Velocity rotation + C-grid + barotropic
     angle = metrics.get('angle', np.zeros_like(metrics['lat_rho']))
     u_rho, v_rho = rotate_uv(u_rho, v_rho, 0.0, angle)
+
     u, v = uv_to_cgrid(u_rho, v_rho, metrics.get('mask_u'), metrics.get('mask_v'), spval)
+
     z_w = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, 5, h, zeta)
-    z_w_t = z_w.transpose(2, 0, 1)  # (N+1, eta, xi)
-    ubar, vbar = compute_ubar_vbar(u, v, z_w_t, metrics.get('mask_u'), metrics.get('mask_v'))
+    z_w_t = z_w.transpose(2, 0, 1)
+    ubar, vbar = compute_ubar_vbar_legacy(u, v, z_w_t,
+                                           metrics.get('mask_u'), metrics.get('mask_v'))
 
-    if time_ref and src_time is not None:
-        ref = _parse_date(_re_search(r'since\s+(.+)', time_ref).group(1) if 'since' in time_ref else time_ref)
-        ocean_time = np.array([src_time[idx] - ref])
+    # Ocean time
+    tinfo = src.get('time_info')
+    if time_ref and tinfo and tinfo[0] is not None:
+        ocean_time, _ = _compute_ocean_time(tinfo, init_date, time_ref)
+    elif src_time is not None:
+        m = __import__('re').search(r'since\s+(.+)', time_ref) if time_ref else None
+        ref = _parse_date(m.group(1)) if m else 0.0
+        ocean_time = float(src_time[idx] - ref) if src_time is not None else 0.0
     else:
-        ocean_time = np.array([0.0])
+        ocean_time = 0.0
 
-    s_rho, Cs_r = stretching(Vstretching, theta_s, theta_b, N, 0)
-    s_w, Cs_w = stretching(Vstretching, theta_s, theta_b, N, 1)
-    vgrid_params = {'Vtransform': Vtransform, 'Vstretching': Vstretching,
-                    'theta_s': theta_s, 'theta_b': theta_b, 'Tcline': Tcline, 'hc': Tcline,
-                    's_rho': s_rho, 'Cs_r': Cs_r, 's_w': s_w, 'Cs_w': Cs_w}
-
-    write_ic_file(ini_file, metrics, vgrid_params, ocean_time,
-                  zeta, temp, salt, u, v, ubar, vbar)
+    # Write
+    _write_ic_netcdf(ini_file, h, metrics['lon_rho'], metrics['lat_rho'],
+                     metrics['lon_u'], metrics['lat_u'],
+                     metrics['lon_v'], metrics['lat_v'],
+                     ocean_time, theta_s, theta_b, Tcline, Tcline,
+                     N, zeta, ubar, vbar, u, v, temp, salt,
+                     Vtransform, Vstretching, time_ref or '1990-01-01')
     print(f"Written: {ini_file}")
-    return {'zeta': zeta, 'temp': temp, 'salt': salt, 'u': u, 'v': v}
+    return {'zeta': zeta, 'temp': temp, 'salt': salt, 'u': u, 'v': v,
+            'ubar': ubar, 'vbar': vbar}

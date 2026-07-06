@@ -1,31 +1,27 @@
 """
-ROMS → ROMS initial conditions via intermediate standard-z grid.
+ROMS -> ROMS initial conditions via intermediate standard-z grid.
 
-输入文件要求:
--------------
-源 ROMS 历史文件应包含: temp, salt, zeta, u, v, angle
-以及维度: ocean_time, s_rho, eta_rho, xi_rho 等
+Source ROMS history file should contain: temp, salt, zeta, u, v, angle
+and dimensions: ocean_time, s_rho, eta_rho, xi_rho, etc.
 
-支持指定单个文件路径或目录（自动搜索 *.nc 文件）。
-时间参考 (time_ref) 自动从源文件的 ocean_time 单位属性读取。
+Supports single file path or directory (auto-search *.nc).
+Time reference auto-read from source ocean_time units.
 """
 
 import os
 import re
 import glob
+from datetime import datetime as _dt
 import numpy as np
 import netCDF4 as nc4
 
-try:
-    from ._core_old import (horizontal_interp, sigma_to_z, z_to_sigma,
-                            rotate_uv, uv_to_cgrid, compute_ubar_vbar,
-                            write_ic_file, _parse_date, _get_time, _match_idx,
-                            _read_roms_grid)
-except ImportError:
-    from _core_old import (horizontal_interp, sigma_to_z, z_to_sigma,
-                           rotate_uv, uv_to_cgrid, compute_ubar_vbar,
-                           write_ic_file, _parse_date, _get_time, _match_idx,
-                           _read_roms_grid)
+from ._core import (
+    _read_roms_grid, _resolve_vgrid_params, set_depth, stretching,
+    horizontal_interp, sigma_to_z, z_to_sigma,
+    rotate_uv, uv_to_cgrid, compute_ubar_vbar_legacy,
+    _detect_time_units, _parse_date, _get_time, _match_idx,
+    _write_ic_netcdf, FILL_VAL,
+)
 
 DEFAULT_Z = np.array([
     -7500, -7000, -6500, -6000, -5500, -5000, -4500, -4000, -3500,
@@ -38,7 +34,6 @@ DEFAULT_Z = np.array([
 
 def _get_var(filename, varname, time_idx=0):
     """Read one variable from a ROMS file."""
-    import netCDF4 as nc4
     ds = nc4.Dataset(filename)
     arr = ds.variables[varname][:]
     if arr.ndim == 4:
@@ -52,6 +47,10 @@ def _remap_var(var_name, src_file, src_grd, src_z_r, src_z_w,
                src_time=0, spval=1e37):
     """
     Remap one variable from source ROMS to target ROMS via intermediate Z.
+
+    src_z_r, src_z_w: sigma depths for source (nlat, nlon, N) and (nlat, nlon, N+1)
+    dst_z_r, dst_z_w: same for target
+    z_levels: 1D array of standard z-levels (negative, descending)
     """
     src_var = _get_var(src_file, var_name, src_time)
     ndim = 3 if src_var.ndim == 3 else 2
@@ -67,24 +66,24 @@ def _remap_var(var_name, src_file, src_grd, src_z_r, src_z_w,
                                  dst_lon, dst_lat, mask=mask,
                                  fill_value=spval)
 
-    var_z = sigma_to_z(src_var, src_z_r, z_levels, fill_value=spval)
+    # 3D: sigma -> z -> horizontal -> sigma
+    # src_z_r is (nlat_src, nlon_src, N), need (N, nlat_src, nlon_src)
+    src_z_r_t = src_z_r.transpose(2, 0, 1)  # (N, nlat, nlon)
+    dst_z_r_t = dst_z_r.transpose(2, 0, 1)
+
+    var_z = sigma_to_z(src_var, src_z_r_t, z_levels, fill_value=spval)
     var_z_dst = np.zeros((len(z_levels), dst_lon.shape[0], dst_lon.shape[1]))
     for k in range(len(z_levels)):
         var_z_dst[k] = horizontal_interp(src_lon, src_lat, var_z[k],
                                           dst_lon, dst_lat, mask=mask,
                                           fill_value=spval)
-    return z_to_sigma(var_z_dst, z_levels, dst_z_r, fill_value=spval)
+    return z_to_sigma(var_z_dst, z_levels, dst_z_r_t, fill_value=spval)
 
 
 def _detect_roms_time_ref(src_file):
-    """
-    自动从 ROMS 文件的 ocean_time 变量读取时间参考。
-
-    返回格式: 'YYYY-MM-DD HH:MM:SS' 或 'YYYY-MM-DD'
-    """
+    """Auto-detect time reference from ROMS ocean_time variable."""
     try:
         ds = nc4.Dataset(src_file, 'r')
-        # 查找 ocean_time 变量
         time_var = None
         for candidate in ['ocean_time', 'time', 'time_counter']:
             if candidate in ds.variables:
@@ -93,21 +92,17 @@ def _detect_roms_time_ref(src_file):
         if time_var is None:
             ds.close()
             return None
-
         units = getattr(time_var, 'units', '')
         ds.close()
-
-        # 解析单位字符串
         m = re.search(r'since\s+([\d\-]+\s*[\d:]*)', units)
         if m:
             ref_str = m.group(1).strip()
-            # 标准化格式
             try:
-                dt = datetime.strptime(ref_str, '%Y-%m-%d %H:%M:%S')
+                dt = __import__('datetime').datetime.strptime(ref_str, '%Y-%m-%d %H:%M:%S')
                 return dt.strftime('%Y-%m-%d %H:%M:%S')
             except ValueError:
                 try:
-                    dt = datetime.strptime(ref_str, '%Y-%m-%d')
+                    dt = __import__('datetime').datetime.strptime(ref_str, '%Y-%m-%d')
                     return dt.strftime('%Y-%m-%d')
                 except ValueError:
                     return ref_str
@@ -117,14 +112,9 @@ def _detect_roms_time_ref(src_file):
 
 
 def _detect_roms_files(src_hist_file=None, src_hist_dir=None):
-    """
-    自动检测 ROMS 历史文件。
-
-    返回排序后的文件路径列表。
-    """
+    """Auto-detect ROMS history files."""
     if src_hist_file and os.path.isfile(src_hist_file):
         return [src_hist_file]
-
     if src_hist_dir and os.path.isdir(src_hist_dir):
         patterns = ['*.nc', 'ocean_his_*.nc', 'ocean_avg_*.nc', 'roms_his_*.nc']
         files = []
@@ -132,114 +122,131 @@ def _detect_roms_files(src_hist_file=None, src_hist_dir=None):
             files.extend(glob.glob(os.path.join(src_hist_dir, pattern)))
         if files:
             return sorted(set(files))
-
     return []
 
 
 def roms_to_roms_ini(src_grid_file, src_hist_file=None, dst_grid_file=None,
                      ini_file=None, src_time=0,
-                     Vtransform=2, Vstretching=4,
-                     theta_s=7.0, theta_b=0.1, Tcline=20.0, N=30,
+                     Vtransform=None, Vstretching=None,
+                     theta_s=None, theta_b=None, Tcline=None, N=None,
                      z_levels=None, var_mapping=None,
                      init_date=None, time_ref=None,
                      src_hist_dir=None):
     """
-    Create ROMS IC from another ROMS run.
+    Create ROMS IC from another ROMS run (nesting).
 
     Parameters
     ----------
+    src_grid_file : str
+        Source (parent) ROMS grid file.
     src_hist_file : str, optional
-        源 ROMS 历史文件路径
+        Source ROMS history file path.
     src_hist_dir : str, optional
-        源 ROMS 历史文件目录（自动搜索）
-    init_date : str
-        指定制作哪一天的 IC，如 '2025-05-01'
+        Source ROMS history directory (auto-search).
+    dst_grid_file : str
+        Target (child) ROMS grid file.
+    ini_file : str
+        Output IC file path.
+    src_time : int
+        Time index in source file.
+    Vtransform, Vstretching, theta_s, theta_b, Tcline, N
+        Target ROMS vertical grid parameters.
+    z_levels : ndarray, optional
+        Intermediate z-levels. Default: DEFAULT_Z.
+    var_mapping : dict, optional
+        Variable name mapping {'temp': 'temperature', ...}.
+    init_date : str, optional
+        Which date's IC to make, e.g. '2025-05-01'.
     time_ref : str, optional
-        时间参考，自动从源文件 ocean_time 单位读取
+        Time reference, auto-read from source file if None.
     """
-    try:
-        from ..grid import set_depth
-    except ImportError:
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-        from grid import set_depth
-
     if z_levels is None:
         z_levels = DEFAULT_Z
 
-    # 自动检测文件
+    if ini_file is None:
+        ini_file = 'roms_ini_nested.nc'
+
+    # Auto-detect files
     src_files = _detect_roms_files(src_hist_file, src_hist_dir)
     if not src_files:
-        raise FileNotFoundError('未找到 ROMS 历史文件')
-
-    # 使用第一个文件获取时间和网格信息
+        raise FileNotFoundError('No ROMS history files found')
     first_file = src_files[0]
 
-    # 自动检测时间参考
+    # Auto-detect time reference
     if time_ref is None:
         time_ref = _detect_roms_time_ref(first_file)
         if time_ref:
-            print(f'  自动检测时间参考: {time_ref}')
+            print(f'  Auto-detected time reference: {time_ref}')
         else:
             time_ref = '1970-01-01'
-            print(f'  警告: 无法检测时间参考，使用默认值: {time_ref}')
 
+    # Read grids
     src_grd = _read_roms_grid(src_grid_file)
     dst_grd = _read_roms_grid(dst_grid_file)
 
-    # Resolve time
+    # Resolve vertical grid params from dst grid if not user-specified
+    _vgrid = _resolve_vgrid_params(dst_grid_file, Vtransform, Vstretching,
+                                    theta_s, theta_b, Tcline, N)
+    Vtransform = _vgrid['Vtransform']
+    Vstretching = _vgrid['Vstretching']
+    theta_s = _vgrid['theta_s']
+    theta_b = _vgrid['theta_b']
+    Tcline = _vgrid['Tcline']
+    hc = _vgrid['hc']
+    N = _vgrid['N']
+
+    # Time matching
     src_times = _get_time(first_file)
     if init_date is not None and src_times is not None:
         src_time = _match_idx(src_times, init_date)
-        print(f"  init_date={init_date} → time index {src_time}")
+        print(f"  init_date={init_date} -> time index {src_time}")
     ocean_time_val = src_times[src_time] if (init_date and src_times is not None) else 0.0
 
-    # 计算 ocean_time
+    # Compute ocean_time
+    from datetime import datetime
     m = re.search(r'since\s+(.+)', time_ref)
     if m:
         ref_epoch = _parse_date(m.group(1))
     else:
         ref_epoch = _parse_date(time_ref)
-    ocean_time_val = ocean_time_val - ref_epoch
-    ocean_time = np.array([ocean_time_val])
+    if ref_epoch is not None and src_times is not None:
+        ocean_time_val = float(src_times[src_time] - ref_epoch)
 
-    # Source depths
-    src_Vt = int(src_grd.get('Vtransform', 1))
-    src_Vs = int(src_grd.get('Vstretching', 1))
-    src_N = 30
-    if src_hist_file:
-        import netCDF4 as nc4
-        h = nc4.Dataset(src_hist_file)
-        if 's_rho' in h.dimensions:
-            src_N = len(h.dimensions['s_rho'])
-        h.close()
+    ocean_time = float(ocean_time_val)
 
-    src_z_w = set_depth(src_Vt, src_Vs,
+    # Source vertical grid
+    src_N = N
+    ds_tmp = nc4.Dataset(first_file)
+    if 's_rho' in ds_tmp.dimensions:
+        src_N = len(ds_tmp.dimensions['s_rho'])
+    ds_tmp.close()
+
+    src_z_w = set_depth(2, 4,
                         src_grd.get('theta_s', 5.0),
                         src_grd.get('theta_b', 0.4),
-                        src_grd.get('Tcline', 10.0), src_N,
-                        src_grd['h'], igrid=5)
-    src_z_r = set_depth(src_Vt, src_Vs,
+                        src_grd.get('Tcline', 10.0), src_N, 5,
+                        src_grd['h'], np.zeros_like(src_grd['h']))
+    src_z_r = set_depth(2, 4,
                         src_grd.get('theta_s', 5.0),
                         src_grd.get('theta_b', 0.4),
-                        src_grd.get('Tcline', 10.0), src_N,
-                        src_grd['h'], igrid=1)
+                        src_grd.get('Tcline', 10.0), src_N, 1,
+                        src_grd['h'], np.zeros_like(src_grd['h']))
 
-    # Target depths
-    dst_z_w = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline,
-                        N, dst_grd['h'], igrid=5)
-    dst_z_r = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline,
-                        N, dst_grd['h'], igrid=1)
+    # Target vertical grid
+    dst_z_w = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, 5,
+                        dst_grd['h'], np.zeros_like(dst_grd['h']))
+    dst_z_r = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline, N, 1,
+                        dst_grd['h'], np.zeros_like(dst_grd['h']))
 
-    spval = 1e37
+    spval = FILL_VAL
 
-    # Resolve variable names
-    vmap = var_mapping or {}
-    v = lambda k: vmap.get(k, k)
-
-    # Remap source rotation angle
-    parent_angle = _remap_var(v('angle'), src_grid_file, src_grd, src_z_r, src_z_w,
+    # Remap source angle for velocity rotation
+    parent_angle = _remap_var('angle', src_grid_file, src_grd, src_z_r, src_z_w,
                               dst_grd, dst_z_r, dst_z_w, z_levels, src_time, spval)
     target_angle = dst_grd.get('angle', np.zeros_like(dst_grd['lat_rho']))
+
+    vmap = var_mapping or {}
+    v = lambda k: vmap.get(k, k)
 
     print("Remapping 3D ...")
     temp = _remap_var(v('temp'), src_hist_file, src_grd, src_z_r, src_z_w,
@@ -255,32 +262,49 @@ def roms_to_roms_ini(src_grid_file, src_hist_file=None, dst_grid_file=None,
     v_rho = _remap_var(v('v'), src_hist_file, src_grd, src_z_r, src_z_w,
                        dst_grd, dst_z_r, dst_z_w, z_levels, src_time, spval)
 
-    # Rotate: source XI/ETA → true N/E → target XI/ETA
+    # Rotate: source -> true N/E -> target
     u_rho, v_rho = rotate_uv(u_rho, v_rho, parent_angle, target_angle)
     u, v = uv_to_cgrid(u_rho, v_rho, dst_grd.get('mask_u'),
                        dst_grd.get('mask_v'), spval)
-    ubar, vbar = compute_ubar_vbar(u, v, dst_z_w, dst_grd.get('mask_u'),
-                                   dst_grd.get('mask_v'))
+    ubar, vbar = compute_ubar_vbar_legacy(u, v, dst_z_w.transpose(2, 0, 1),
+                                           dst_grd.get('mask_u'),
+                                           dst_grd.get('mask_v'))
 
-    # 陆地点设为 fill_value（与 cmems_ic 一致）
-    spval = 1e37
-    wm3d_rho = np.tile(dst_grd['mask_rho'], (N, 1, 1))
+    # Land masks
+    N_target = dst_z_r.shape[2]
+    wm3d_rho = np.tile(dst_grd['mask_rho'], (N_target, 1, 1))
     temp[wm3d_rho == 0] = spval
     salt[wm3d_rho == 0] = spval
     zeta[dst_grd['mask_rho'] == 0] = spval
 
-    wm3d_u = np.tile(dst_grd.get('mask_u', np.ones_like(dst_grd['mask_rho'])), (N, 1, 1))
+    wm3d_u = np.tile(dst_grd.get('mask_u', np.ones_like(dst_grd['mask_rho'])),
+                     (N_target, 1, 1))
     u[wm3d_u == 0] = spval
     ubar[dst_grd.get('mask_u', np.ones_like(dst_grd['mask_rho'])) == 0] = spval
 
-    wm3d_v = np.tile(dst_grd.get('mask_v', np.ones_like(dst_grd['mask_rho'])), (N, 1, 1))
+    wm3d_v = np.tile(dst_grd.get('mask_v', np.ones_like(dst_grd['mask_rho'])),
+                     (N_target, 1, 1))
     v[wm3d_v == 0] = spval
     vbar[dst_grd.get('mask_v', np.ones_like(dst_grd['mask_rho'])) == 0] = spval
 
-    vgrid_params = {'Vtransform': Vtransform, 'Vstretching': Vstretching,
-                    'theta_s': theta_s, 'theta_b': theta_b,
-                    'Tcline': Tcline, 'hc': Tcline}
-    write_ic_file(ini_file, dst_grd, vgrid_params, ocean_time,
-                  zeta, temp, salt, u, v, ubar, vbar,
-                  time_ref=time_ref or '1990-01-01')
+    # Write output — normalize time_ref for writer (it appends ' 00:00:00')
+    try:
+        _ref_dt = _dt.strptime(time_ref, '%Y-%m-%d %H:%M:%S')
+        time_ref_out = _ref_dt.strftime('%Y-%m-%d')
+    except (ValueError, TypeError):
+        try:
+            _ref_dt = _dt.strptime(time_ref, '%Y-%m-%d')
+            time_ref_out = time_ref
+        except (ValueError, TypeError):
+            time_ref_out = '1990-01-01'
+
+    _write_ic_netcdf(ini_file, dst_grd['h'],
+                     dst_grd['lon_rho'], dst_grd['lat_rho'],
+                     dst_grd['lon_u'], dst_grd['lat_u'],
+                     dst_grd['lon_v'], dst_grd['lat_v'],
+                     ocean_time, theta_s, theta_b, Tcline, Tcline,
+                     N, zeta, ubar, vbar, u, v, temp, salt,
+                     Vtransform, Vstretching, time_ref_out)
     print(f"Written: {ini_file}")
+    return {'zeta': zeta, 'temp': temp, 'salt': salt, 'u': u, 'v': v,
+            'ubar': ubar, 'vbar': vbar}

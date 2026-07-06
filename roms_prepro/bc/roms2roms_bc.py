@@ -22,12 +22,14 @@ try:
                         write_bry_file, EDGE_NAMES,
                         _fill_nan, _parse_date, _get_time, _match_idx,
                         _filter_files, _read_roms_grid)
+    from ..ic._core import _resolve_vgrid_params
 except ImportError:
     from _core import (horizontal_interp, sigma_to_z, z_to_sigma,
                        rotate_uv, uv_to_cgrid, compute_ubar_vbar,
                        write_bry_file, EDGE_NAMES,
                        _fill_nan, _parse_date, _get_time, _match_idx,
                        _filter_files, _read_roms_grid)
+    from ..ic._core import _resolve_vgrid_params
 
 DEFAULT_Z = np.array([
     -7500, -7000, -6500, -6000, -5500, -5000, -4500, -4000, -3500,
@@ -144,8 +146,8 @@ def _detect_roms_files(src_hist_files=None, src_hist_dir=None):
 
 def roms_to_roms_bry(src_grid_file, src_hist_files=None, dst_grid_file=None,
                      bry_file=None,
-                     Vtransform=2, Vstretching=4,
-                     theta_s=7.0, theta_b=0.1, Tcline=20.0, N=30,
+                     Vtransform=None, Vstretching=None,
+                     theta_s=None, theta_b=None, Tcline=None, N=None,
                      boundaries=(False, True, True, True),
                      z_levels=None, var_mapping=None,
                      start_date=None, end_date=None,
@@ -198,6 +200,16 @@ def roms_to_roms_bry(src_grid_file, src_hist_files=None, dst_grid_file=None,
 
     src_grd = _read_roms_grid(src_grid_file)
     dst_grd = _read_roms_grid(dst_grid_file)
+
+    _vgrid = _resolve_vgrid_params(dst_grid_file, Vtransform, Vstretching,
+                                    theta_s, theta_b, Tcline, N)
+    Vtransform = _vgrid['Vtransform']
+    Vstretching = _vgrid['Vstretching']
+    theta_s = _vgrid['theta_s']
+    theta_b = _vgrid['theta_b']
+    Tcline = _vgrid['Tcline']
+    hc = _vgrid['hc']
+    N = _vgrid['N']
 
     src_Vt = int(src_grd.get('Vtransform', 1))
     src_Vs = int(src_grd.get('Vstretching', 1))

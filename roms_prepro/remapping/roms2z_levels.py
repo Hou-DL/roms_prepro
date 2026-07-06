@@ -46,6 +46,9 @@ def _get_grid_shape(igrid, eta_rho, xi_rho):
         return (eta_rho - 1, xi_rho)
     else:  # RHO, PSI, W
         return (eta_rho, xi_rho)
+
+
+def _parse_vertical_params(ds):
     """
     Parse vertical coordinate parameters from a ROMS dataset.
 
@@ -73,30 +76,6 @@ def _get_grid_shape(igrid, eta_rho, xi_rho):
 
     return Vtransform, Vstretching, theta_s, theta_b, hc, N
 
-
-def _interp_to_z_1d(val_profile, z_profile, std_z):
-    """
-    Interpolate a single vertical profile to standard z-levels.
-
-    Returns the interpolated values at std_z (negative depths).
-    NaN for out-of-range points.
-    """
-    valid = np.isfinite(val_profile) & np.isfinite(z_profile)
-    if valid.sum() < 2:
-        return np.full(len(std_z), np.nan)
-
-    z_sorted = z_profile[valid]
-    v_sorted = val_profile[valid]
-
-    # Sort by depth (most negative first = deepest)
-    order = np.argsort(z_sorted)
-    z_sorted = z_sorted[order]
-    v_sorted = v_sorted[order]
-
-    # Need scipy for interp1d
-    from scipy.interpolate import interp1d
-    f = interp1d(z_sorted, v_sorted, bounds_error=False, fill_value=np.nan)
-    return f(std_z)
 
 
 def roms_to_z_levels(var_data, z_sigma, std_depths, valid_mask):
@@ -326,9 +305,12 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z'):
             if var_out.ndim == 3:
                 var_out = var_out[np.newaxis, :]
 
-            v_out = ds_out.createVariable(var_name, 'f8', dims_out)
+            fill_val = getattr(src_v, '_FillValue', np.nan)
+            v_out = ds_out.createVariable(var_name, 'f8', dims_out, fill_value=fill_val)
             v_out[:] = var_out
             for attr in src_v.ncattrs():
+                if attr == '_FillValue':
+                    continue
                 setattr(v_out, attr, getattr(src_v, attr))
 
         # Global attributes
@@ -370,7 +352,10 @@ def _interp_to_z_1d(val_profile, z_profile, std_z):
     v_sorted = v_sorted[order]
 
     from scipy.interpolate import interp1d
-    f = interp1d(z_sorted, v_sorted, bounds_error=False, fill_value=np.nan)
+    # z_sorted: deepest(-) → shallowest(+); v_sorted: deepest → shallowest
+    # Use top sigma level value for depths shallower than it (surface gap)
+    f = interp1d(z_sorted, v_sorted, bounds_error=False,
+                 fill_value=(np.nan, v_sorted[-1]))
     return f(std_z)
 
 

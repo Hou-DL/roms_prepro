@@ -58,6 +58,8 @@ from roms_tools import stretching, set_depth, roms_vectors, uv_barotropic
 CMEMS_FILE = None  # None表示使用DATA_DIR方式
 
 DATA_DIR = '//DS1825/q1/public_ocean_data/Mercator/2025'
+# 合并文件名通配符（目录模式下优先搜索此模式）
+CMEMS_MERGED_PATTERN = 'cmems_glo_phy_*.nc'
 GRD_NAME = r'E:\Ocean_data\ERA5\romsinput\output\NSCS_grd_operational_adjust.nc'
 BRY_NAME = 'roms_bry_2025.nc'
 
@@ -148,6 +150,15 @@ def interp_boundary_3d(Finp, lat_1d, lon_1d, target_lat, target_lon):
 
 
 # ============================================================
+#  辅助函数
+# ============================================================
+
+def _open_nc(path):
+    """Open a NetCDF file, preferring netCDF4 (h5netcdf is optional)."""
+    return xr.open_dataset(path, engine='netcdf4')
+
+
+# ============================================================
 #  主程序
 # ============================================================
 
@@ -164,7 +175,7 @@ def main():
     # ---- 1. 读取ROMS网格 ----
     print('\n[1/5] 读取ROMS网格...')
     try:
-        ds = xr.open_dataset(GRD_NAME, engine='h5netcdf')
+        ds = _open_nc(GRD_NAME)
     except:
         ds = xr.open_dataset(GRD_NAME)
     h = ds['h'].values
@@ -178,15 +189,29 @@ def main():
     Lp, Mp = h.shape
     print(f'  Grid: {Lp} x {Mp} (eta, xi)')
 
+    # 自动读取网格参数（未指定时使用网格文件中的值）
+    from ..ic._core import _read_vgrid_params
+    _grid_params = _read_vgrid_params(GRD_NAME)
+    _VTRANSFORM = VTRANSFORM if 'VTRANSFORM' not in dir() or VTRANSFORM is not None else _grid_params.get('VTRANSFORM', 2)
+    _VSTRETCHING = VSTRETCHING if 'VSTRETCHING' not in dir() or VSTRETCHING is not None else _grid_params.get('VSTRETCHING', 2)
+    _THETA_S = THETA_S if 'THETA_S' not in dir() or THETA_S is not None else _grid_params.get('theta_s', 2.5)
+    _THETA_B = THETA_B if 'THETA_B' not in dir() or THETA_B is not None else _grid_params.get('theta_b', 1.0)
+    _TCLINE = TCLINE if 'TCLINE' not in dir() or TCLINE is not None else _grid_params.get('Tcline', 25.0)
+    _N_LEVELS = N_LEVELS if 'N_LEVELS' not in dir() or N_LEVELS is not None else _grid_params.get('N', 30)
+    print(f'  网格参数: Vtransform={_VTRANSFORM}, Vstretching={_VSTRETCHING}, '
+          f'theta_s={_THETA_S}, theta_b={_THETA_B}, Tcline={_TCLINE}, N={_N_LEVELS}')
+    if _grid_params:
+        print(f'  (从网格文件读取: {_grid_params})')
+
     # 垂直坐标
-    hc = TCLINE; ssh = np.zeros_like(h)
-    s_rho, Cs_r = stretching(VSTRETCHING, THETA_S, THETA_B, hc, N_LEVELS, 0)
-    s_w, Cs_w = stretching(VSTRETCHING, THETA_S, THETA_B, hc, N_LEVELS, 1)
-    z_r = set_depth(VTRANSFORM, VSTRETCHING, THETA_S, THETA_B, hc, N_LEVELS, 1, h, ssh)
-    z_u = set_depth(VTRANSFORM, VSTRETCHING, THETA_S, THETA_B, hc, N_LEVELS, 3, h, ssh)
-    z_v = set_depth(VTRANSFORM, VSTRETCHING, THETA_S, THETA_B, hc, N_LEVELS, 4, h, ssh)
-    z_w = set_depth(VTRANSFORM, VSTRETCHING, THETA_S, THETA_B, hc, N_LEVELS, 5, h, ssh)
-    Hz = z_w[:,:,1:N_LEVELS+1] - z_w[:,:,0:N_LEVELS]
+    hc = _TCLINE; ssh = np.zeros_like(h)
+    s_rho, Cs_r = stretching(_VSTRETCHING, _THETA_S, _THETA_B, hc, _N_LEVELS, 0)
+    s_w, Cs_w = stretching(_VSTRETCHING, _THETA_S, _THETA_B, hc, _N_LEVELS, 1)
+    z_r = set_depth(_VTRANSFORM, _VSTRETCHING, _THETA_S, _THETA_B, hc, _N_LEVELS, 1, h, ssh)
+    z_u = set_depth(_VTRANSFORM, _VSTRETCHING, _THETA_S, _THETA_B, hc, _N_LEVELS, 3, h, ssh)
+    z_v = set_depth(_VTRANSFORM, _VSTRETCHING, _THETA_S, _THETA_B, hc, _N_LEVELS, 4, h, ssh)
+    z_w = set_depth(_VTRANSFORM, _VSTRETCHING, _THETA_S, _THETA_B, hc, _N_LEVELS, 5, h, ssh)
+    Hz = z_w[:,:,1:_N_LEVELS+1] - z_w[:,:,0:_N_LEVELS]
 
     # 边界网格点 (eta=dim0, xi=dim1)
     # 边界开关 [west, east, south, north]
@@ -224,7 +249,7 @@ def main():
 
     # ---- 2. 发现CMEMS文件 ----
     print('\n[2/5] 发现CMEMS文件...')
-    
+
     # 检查配置模式
     if CMEMS_FILE is not None and os.path.isfile(CMEMS_FILE):
         # 模式1: 使用指定的单个文件（需包含所有变量）
@@ -233,15 +258,17 @@ def main():
         zfiles = tfiles = sfiles = ufiles = vfiles = [CMEMS_FILE]
     else:
         # 模式2: 在目录中搜索文件
-        
+
         # 先尝试查找合并文件（包含所有变量的单个文件）
-        merged_files = sorted(glob.glob(os.path.join(DATA_DIR, 'cmems_merged_*.nc')))
-        
+        merged_files = sorted(glob.glob(os.path.join(DATA_DIR, CMEMS_MERGED_PATTERN)))
+
         if merged_files:
             # 使用合并文件模式
             nfiles = len(merged_files)
             print(f'  发现 {nfiles} 个合并文件')
-            print(f'  文件列表: {[os.path.basename(f) for f in merged_files]}')
+            print(f'  文件列表: {[os.path.basename(f) for f in merged_files[:5]]}')
+            if nfiles > 5:
+                print(f'  ... 及更多 {nfiles - 5} 个文件')
             zfiles = tfiles = sfiles = ufiles = vfiles = merged_files
         else:
             # 使用分离文件模式（各变量单独的文件）
@@ -290,6 +317,36 @@ def main():
             print(f'  搜索路径: {DATA_DIR}')
         sys.exit(1)
 
+    # ---- 2.5 按文件内部时间预过滤 ----
+    print('\n[2.5] 按时间过滤文件...')
+    filtered_indices = []
+    for i in range(nfiles):
+        try:
+            ds = _open_nc(zfiles[i])
+            ftime = ds['time'].values
+            ds.close()
+            if hasattr(ftime[0], 'astype'):
+                t_first = ftime[0].astype('datetime64[ms]').astype(datetime)
+                t_last = ftime[-1].astype('datetime64[ms]').astype(datetime)
+            else:
+                t_first = ftime[0]
+                t_last = ftime[-1]
+            if t_last >= time_start_dt and t_first <= time_end_dt:
+                filtered_indices.append(i)
+        except Exception:
+            filtered_indices.append(i)
+    if filtered_indices:
+        zfiles = [zfiles[i] for i in filtered_indices]
+        tfiles = [tfiles[i] for i in filtered_indices]
+        sfiles = [sfiles[i] for i in filtered_indices]
+        ufiles = [ufiles[i] for i in filtered_indices]
+        vfiles = [vfiles[i] for i in filtered_indices]
+        nfiles = len(filtered_indices)
+        print(f'  保留 {nfiles} 个文件 (时间范围 {TIME_START} ~ {TIME_END})')
+    else:
+        print(f'  没有文件在指定时间范围内!')
+        sys.exit(1)
+
     # ---- 3. 创建NetCDF ----
     print(f'\n[3/5] 创建 {BRY_NAME}...')
     os.makedirs(os.path.dirname(os.path.abspath(BRY_NAME)), exist_ok=True)
@@ -328,7 +385,7 @@ def main():
 
     for n in range(nfiles):
         # 读取CMEMS网格
-        ds = xr.open_dataset(zfiles[n], engine='h5netcdf')
+        ds = _open_nc(zfiles[n])
         lon_1d, lat_1d = ds['longitude'].values, ds['latitude'].values
         time_dt = ds['time'].values
         ntime = len(time_dt)
@@ -336,20 +393,20 @@ def main():
         ds.close()
 
         # 读取深度
-        ds = xr.open_dataset(tfiles[n], engine='h5netcdf')
+        ds = _open_nc(tfiles[n])
         Tdepth = ds['depth'].values
         Te_all = ds['thetao'].values.astype(float)
         ds.close()
 
-        ds = xr.open_dataset(sfiles[n], engine='h5netcdf')
+        ds = _open_nc(sfiles[n])
         Sa_all = ds['so'].values.astype(float)
         ds.close()
 
-        ds = xr.open_dataset(ufiles[n], engine='h5netcdf')
+        ds = _open_nc(ufiles[n])
         Uv_all = ds['uo'].values.astype(float)
         ds.close()
 
-        ds = xr.open_dataset(vfiles[n], engine='h5netcdf')
+        ds = _open_nc(vfiles[n])
         Vv_all = ds['vo'].values.astype(float)
         ds.close()
 
