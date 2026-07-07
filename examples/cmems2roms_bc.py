@@ -13,7 +13,7 @@ Output: ROMS BRY NetCDF 文件 (含 bry_time 维度)
   Mode B: DATA_DIR 目录自动搜索 (分离变量文件或合并文件)
 
 用法:
-    python example_bc_cmems.py
+    python cmems2roms_bc.py
 
 依赖:
     numpy, scipy, xarray, netCDF4, roms_prepro

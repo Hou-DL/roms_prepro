@@ -19,7 +19,7 @@ Output: 标准 z-level NetCDF 文件
   - 深层处理: 深于最下 sigma 层的深度设为 NaN
 
 用法:
-    python example_z_levels.py
+    python roms2z_levels.py
 
 CLI用法 (batch processing):
     python -m roms_prepro.remapping.roms2z_levels -i ocean_avg_*.nc -d ./output/ --depths 0 10 50 100 200

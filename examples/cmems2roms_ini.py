@@ -13,7 +13,7 @@ Output: ROMS IC NetCDF 文件
   Mode B: 指定 data_dir 目录，自动搜索文件
 
 用法:
-    python d_cmems2roms.py
+    python cmems2roms_ini.py
 
 依赖:
     numpy, scipy, netCDF4, roms_prepro
