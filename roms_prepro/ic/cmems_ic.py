@@ -123,7 +123,6 @@ def cmems_to_roms_ini(roms_grid_file, zeta_file=None, temp_file=None,
                                     theta_s, theta_b, Tcline, N)
     Vtransform = _vgrid['Vtransform']
     Vstretching = _vgrid['Vstretching']
-    Vstretching = _vgrid['Vstretching']
     theta_s = _vgrid['theta_s']
     theta_b = _vgrid['theta_b']
     Tcline = _vgrid['Tcline']
@@ -185,8 +184,9 @@ def cmems_to_roms_ini(roms_grid_file, zeta_file=None, temp_file=None,
           f'U={len(Udepth) if Udepth is not None else 0}, '
           f'V={len(Vdepth) if Vdepth is not None else 0}')
 
-    # ---- Compute ocean_time ----
-    ocean_time, _ = _compute_ocean_time(ttime_info, init_date, time_ref)
+    # ---- Compute ocean_time (timestamp of the selected record) ----
+    ocean_time, _ = _compute_ocean_time(ttime_info, init_date, time_ref,
+                                        time_index=tidx)
     print(f'\n  ocean_time: {ocean_time:.0f} s  (ref: {time_ref})')
 
     # ---- Depth processing ----
@@ -406,7 +406,8 @@ def mercator_to_roms_ini(roms_grid_file, source_file, ini_file,
     v_h = np.nan_to_num(v_h, nan=0.0)
 
     # Vertical interpolation: source depths -> ROMS sigma
-    src_depth = src['depth']
+    # z_to_sigma expects z_levels negative-up; source depths are positive-down
+    src_depth = -np.asarray(src['depth'], dtype=float)
     z_r_t = z_r.transpose(2, 0, 1)  # (N, nlat, nlon) for legacy interpy
 
     temp = z_to_sigma(temp_h, src_depth, z_r_t, fill_value=spval)
@@ -425,24 +426,30 @@ def mercator_to_roms_ini(roms_grid_file, source_file, ini_file,
     ubar, vbar = compute_ubar_vbar_legacy(u, v, z_w_t,
                                            metrics.get('mask_u'), metrics.get('mask_v'))
 
-    # Ocean time
+    # Ocean time — must be seconds relative to the SAME reference the
+    # writer declares (units = 'seconds since {ref} 00:00:00')
+    write_ref = time_ref or '1990-01-01'
     tinfo = src.get('time_info')
     if time_ref and tinfo and tinfo[0] is not None:
         ocean_time, _ = _compute_ocean_time(tinfo, init_date, time_ref)
     elif src_time is not None:
         m = __import__('re').search(r'since\s+(.+)', time_ref) if time_ref else None
-        ref = _parse_date(m.group(1)) if m else 0.0
-        ocean_time = float(src_time[idx] - ref) if src_time is not None else 0.0
+        ref = _parse_date(m.group(1)) if m else _parse_date(write_ref)
+        if ref is None:
+            ref = _parse_date('1990-01-01') or 0.0
+        ocean_time = float(src_time[idx] - ref)
     else:
         ocean_time = 0.0
 
-    # Write
+    # Write — _write_ic_netcdf expects 3-D fields as (eta, xi, s_rho)
     _write_ic_netcdf(ini_file, h, metrics['lon_rho'], metrics['lat_rho'],
                      metrics['lon_u'], metrics['lat_u'],
                      metrics['lon_v'], metrics['lat_v'],
                      ocean_time, theta_s, theta_b, Tcline, Tcline,
-                     N, zeta, ubar, vbar, u, v, temp, salt,
-                     Vtransform, Vstretching, time_ref or '1990-01-01')
+                     N, zeta, ubar, vbar,
+                     u.transpose(1, 2, 0), v.transpose(1, 2, 0),
+                     temp.transpose(1, 2, 0), salt.transpose(1, 2, 0),
+                     Vtransform, Vstretching, write_ref)
     print(f"Written: {ini_file}")
     return {'zeta': zeta, 'temp': temp, 'salt': salt, 'u': u, 'v': v,
             'ubar': ubar, 'vbar': vbar}

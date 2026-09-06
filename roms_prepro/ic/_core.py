@@ -738,11 +738,13 @@ def _parse_time_units(units_str):
     return multiplier, epoch
 
 
-def _compute_ocean_time(time_info, init_date, roms_time_ref):
+def _compute_ocean_time(time_info, init_date, roms_time_ref, time_index=None):
     """
     Compute ocean_time (seconds) from CMEMS time metadata.
 
     Returns (ocean_time_seconds, time_index_int).
+    ``time_index`` is used when ``init_date`` is None so that an explicitly
+    selected record is also timestamped with that record's time.
     """
     time_units, time_values = time_info
     if time_units is None or time_values is None:
@@ -757,6 +759,8 @@ def _compute_ocean_time(time_info, init_date, roms_time_ref):
         time_dates = [epoch + timedelta(seconds=float(v) * multiplier) for v in time_values]
         idx = min(range(len(time_dates)),
                   key=lambda i: abs((time_dates[i] - init_dt).total_seconds()))
+    elif time_index is not None:
+        idx = int(min(time_index, len(time_values) - 1))
     else:
         idx = 0
 
