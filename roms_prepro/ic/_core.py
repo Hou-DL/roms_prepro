@@ -46,29 +46,18 @@ _VAR_ALIASES = {
 
 
 # =====================================================================
-# Vertical coordinate functions (from d_cmems2roms_py.py — EXACT)
+# Vertical coordinate functions
+# stretching is delegated to grid.vgrid (numerically verified against
+# pyroms / ROMS set_scoord for Vstretching 1-5). The previous local copy
+# used the Song & Haidvogel (1994) curve for every Vstretching value,
+# which misplaced the vertical levels for Vstretching >= 2.
 # =====================================================================
 
-def stretching(Vstretching, theta_s, theta_b, N, kgrid):
-    """ROMS vertical stretching function (Vstretching=1..4)."""
-    ds = 1.0 / N
-    if kgrid == 0:  # RHO-points
-        s = (np.arange(1, N + 1) - 0.5) * ds - 1.0
-    else:  # W-points
-        s = np.arange(0, N + 1) * ds - 1.0
-
-    if Vstretching == 1:
-        C = (1.0 - theta_b) * np.sinh(theta_s * s) / np.sinh(theta_s) + \
-            theta_b * (np.tanh(theta_s * (s + 0.5)) / (2.0 * np.tanh(0.5 * theta_s)) - 0.5)
-    elif Vstretching in (2, 3):
-        C = (1.0 - theta_b) * np.sinh(theta_s * s) / np.sinh(theta_s) + \
-            theta_b * (np.tanh(theta_s * (s + 0.5)) / (2.0 * np.tanh(0.5 * theta_s)) - 0.5)
-    elif Vstretching == 4:
-        C = (1.0 - theta_b) * np.sinh(theta_s * s) / np.sinh(theta_s) + \
-            theta_b * (np.tanh(theta_s * (s + 0.5)) / (2.0 * np.tanh(0.5 * theta_s)) - 0.5)
-    else:
-        raise ValueError(f"Unsupported Vstretching={Vstretching}")
-    return s, C
+try:
+    from ..grid.vgrid import stretching  # noqa: F401  (re-exported)
+except ImportError:  # direct-script mode
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    from grid.vgrid import stretching  # noqa: F401
 
 
 def set_depth(Vtransform, Vstretching, theta_s, theta_b, hc, N, igrid, h, zeta):

@@ -463,7 +463,9 @@ def _fill_nan_2d(arr, max_pass=5):
     if not nan_mask.any() or np.all(nan_mask):
         return arr
 
-    _, idx = distance_transform_edt(~nan_mask, return_indices=True)
+    # distance_transform_edt on the NaN mask itself: indices of a NaN cell
+    # then point to the nearest VALID (zero) cell.
+    _, idx = distance_transform_edt(nan_mask, return_indices=True)
     arr[nan_mask] = arr[idx[0][nan_mask], idx[1][nan_mask]]
     return arr
 

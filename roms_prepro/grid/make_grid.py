@@ -152,31 +152,32 @@ def _lonlat_to_grid_metrics(lon_rho, lat_rho):
     lonp[1:ny, 1:nx] = lon_psi
     latp[1:ny, 1:nx] = lat_psi
 
-    # Western edge (j=0 in python): lon_v(1, 1:Jm-1) at j=1 in matlab
-    lonp[0, 1:nx] = lon_v[0, :-1]
-    latp[0, 1:nx] = lat_v[0, :-1]
+    # Edge completion by linear extrapolation along the grid direction:
+    # corner row 0 sits at eta = -0.5 (half a cell OUTSIDE the rho grid),
+    # so it is obtained from 2*U(eta=0) - PSI(eta=0.5). Simple assignment
+    # of U/V values would place the edge half a cell inside and double the
+    # boundary pm/pn.
+    lonp[0, 1:nx] = 2.0 * lon_u[0, :] - lon_psi[0, :]
+    latp[0, 1:nx] = 2.0 * lat_u[0, :] - lat_psi[0, :]
 
-    # Eastern edge (j=end): lon_v(end, 1:Jm-1) at j=Mp
-    lonp[-1, 1:nx] = lon_v[-1, :-1]
-    latp[-1, 1:nx] = lat_v[-1, :-1]
+    lonp[-1, 1:nx] = 2.0 * lon_u[-1, :] - lon_psi[-1, :]
+    latp[-1, 1:nx] = 2.0 * lat_u[-1, :] - lat_psi[-1, :]
 
-    # Southern edge (i=0): lon_u(1:Im-1, 1) at i=1
-    lonp[1:ny, 0] = lon_u[:-1, 0]
-    latp[1:ny, 0] = lat_u[:-1, 0]
+    lonp[1:ny, 0] = 2.0 * lon_v[:, 0] - lon_psi[:, 0]
+    latp[1:ny, 0] = 2.0 * lat_v[:, 0] - lat_psi[:, 0]
 
-    # Northern edge (i=end): lon_u(1:Im-1, end) at i=Lp
-    lonp[1:ny, -1] = lon_u[:-1, -1]
-    latp[1:ny, -1] = lat_u[:-1, -1]
+    lonp[1:ny, -1] = 2.0 * lon_v[:, -1] - lon_psi[:, -1]
+    latp[1:ny, -1] = 2.0 * lat_v[:, -1] - lat_psi[:, -1]
 
-    # Corners
-    lonp[0, 0] = lon_rho[0, 0]
-    latp[0, 0] = lat_rho[0, 0]
-    lonp[-1, 0] = lon_rho[-1, 0]
-    latp[-1, 0] = lat_rho[-1, 0]
-    lonp[0, -1] = lon_rho[0, -1]
-    latp[0, -1] = lat_rho[0, -1]
-    lonp[-1, -1] = lon_rho[-1, -1]
-    latp[-1, -1] = lat_rho[-1, -1]
+    # Corners: bilinear extension from the completed edges
+    lonp[0, 0] = lonp[0, 1] + lonp[1, 0] - lonp[1, 1]
+    latp[0, 0] = latp[0, 1] + latp[1, 0] - latp[1, 1]
+    lonp[-1, 0] = lonp[-1, 1] + lonp[-2, 0] - lonp[-2, 1]
+    latp[-1, 0] = latp[-1, 1] + latp[-2, 0] - latp[-2, 1]
+    lonp[0, -1] = lonp[0, -2] + lonp[1, -1] - lonp[1, -2]
+    latp[0, -1] = latp[0, -2] + latp[1, -1] - latp[1, -2]
+    lonp[-1, -1] = lonp[-1, -2] + lonp[-2, -1] - lonp[-2, -2]
+    latp[-1, -1] = latp[-1, -2] + latp[-2, -1] - latp[-2, -2]
 
     # -----------------------------------------------------------------------
     # 3.  Compute pm, pn, angle using the Shchepetkin algorithm
@@ -192,34 +193,38 @@ def _lonlat_to_grid_metrics(lon_rho, lat_rho):
 
     for j in range(nx):
         for i in range(ny):
-            # dLon/dXi
-            dLnX1 = lonp_rad[i + 1, j + 1] - lonp_rad[i, j + 1]
+            # dLon along ETA (row index i varies, column fixed)
+            dLnE1 = lonp_rad[i + 1, j + 1] - lonp_rad[i, j + 1]
+            if dLnE1 > np.pi:      dLnE1 -= 2 * np.pi
+            elif dLnE1 < -np.pi:   dLnE1 += 2 * np.pi
+            dLnE = lonp_rad[i + 1, j] - lonp_rad[i, j]
+            if dLnE > np.pi:       dLnE -= 2 * np.pi
+            elif dLnE < -np.pi:    dLnE += 2 * np.pi
+
+            # dLon along XI (column index j varies, row fixed)
+            dLnX1 = lonp_rad[i + 1, j + 1] - lonp_rad[i + 1, j]
             if dLnX1 > np.pi:      dLnX1 -= 2 * np.pi
             elif dLnX1 < -np.pi:   dLnX1 += 2 * np.pi
-            dLnX = lonp_rad[i + 1, j] - lonp_rad[i, j]
+            dLnX = lonp_rad[i, j + 1] - lonp_rad[i, j]
             if dLnX > np.pi:       dLnX -= 2 * np.pi
             elif dLnX < -np.pi:    dLnX += 2 * np.pi
 
-            # dLon/dEta
-            dLnY1 = lonp_rad[i + 1, j + 1] - lonp_rad[i + 1, j]
-            if dLnY1 > np.pi:      dLnY1 -= 2 * np.pi
-            elif dLnY1 < -np.pi:   dLnY1 += 2 * np.pi
-            dLnY = lonp_rad[i, j + 1] - lonp_rad[i, j]
-            if dLnY > np.pi:       dLnY -= 2 * np.pi
-            elif dLnY < -np.pi:    dLnY += 2 * np.pi
-
             cff = 0.5 * np.cos(latr[i, j])
 
-            a11 = cff * (dLnX + dLnX1)
-            a12 = cff * (dLnY + dLnY1)
+            # (a11, a21) = mean step vector along ETA (rows)
+            # (a12, a22) = mean step vector along XI  (cols)
+            a11 = cff * (dLnE + dLnE1)
+            a12 = cff * (dLnX + dLnX1)
             a21 = 0.5 * (latp_rad[i + 1, j + 1] - latp_rad[i, j + 1] +
                          latp_rad[i + 1, j]     - latp_rad[i, j])
             a22 = 0.5 * (latp_rad[i, j + 1] + latp_rad[i + 1, j + 1] -
                          latp_rad[i, j]         - latp_rad[i + 1, j])
 
+            # ROMS convention (verified against a production grid):
+            #   1/pm = XI-direction spacing,  1/pn = ETA-direction spacing
             with np.errstate(invalid='ignore'):
-                denom_pm = np.sqrt(a11**2 + a21**2)
-                denom_pn = np.sqrt(a12**2 + a22**2)
+                denom_pm = np.sqrt(a12**2 + a22**2)
+                denom_pn = np.sqrt(a11**2 + a21**2)
                 pm[i, j] = 1.0 / (Eradius * denom_pm) if denom_pm > 0 else 0.0
                 pn[i, j] = 1.0 / (Eradius * denom_pn) if denom_pn > 0 else 0.0
 
@@ -265,22 +270,15 @@ def _lonlat_to_grid_metrics(lon_rho, lat_rho):
 
     # -----------------------------------------------------------------------
     # 4.  Compute Cartesian coordinates (x_rho, y_rho)
+    #     x accumulates along XI with dx = 1/pm, y along ETA with dy = 1/pn.
+    #     Distance between adjacent rho points is estimated as the mean of
+    #     their local spacings (exact for uniform grids).
     # -----------------------------------------------------------------------
     x_rho = np.zeros_like(dx)
-    for j in range(nx):
-        x_rho[0, j] = -dx[0, j]
-        for i in range(ny - 1):
-            x_rho[i + 1, j] = x_rho[i, j] + dx[i + 1, j]
-        x_rho[0, j]  += 0.5 * dx[0, j]
-        x_rho[-1, j] -= 0.5 * dx[-1, j]
+    x_rho[:, 1:] = np.cumsum(0.5 * (dx[:, :-1] + dx[:, 1:]), axis=1)
 
     y_rho = np.zeros_like(dy)
-    for i in range(ny):
-        y_rho[i, 0] = -dy[i, 0]
-        for j in range(nx - 1):
-            y_rho[i, j + 1] = y_rho[i, j] + dy[i, j + 1]
-        y_rho[i, 0]  += 0.5 * dy[i, 0]
-        y_rho[i, -1] -= 0.5 * dy[i, -1]
+    y_rho[1:, :] = np.cumsum(0.5 * (dy[:-1, :] + dy[1:, :]), axis=0)
 
     x_psi = 0.25 * (x_rho[:-1, :-1] + x_rho[1:, :-1] +
                     x_rho[:-1, 1:]  + x_rho[1:, 1:])
@@ -300,8 +298,11 @@ def _lonlat_to_grid_metrics(lon_rho, lat_rho):
     dndx = np.zeros_like(lon_rho)
     dmde = np.zeros_like(lon_rho)
 
-    dndx[1:L, 1:M] = 0.5 * (1.0 / pn[2:ny, 1:M] - 1.0 / pn[0:Lm, 1:M])
-    dmde[1:L, 1:M] = 0.5 * (1.0 / pm[1:L, 2:nx] - 1.0 / pm[1:L, 0:Mm])
+    # ROMS convention (verified against a production grid):
+    #   dndx = d(1/pn)/d(xi)  (ETA spacing differentiated along XI, columns)
+    #   dmde = d(1/pm)/d(eta) (XI  spacing differentiated along ETA, rows)
+    dndx[1:L, 1:M] = 0.5 * (1.0 / pn[1:L, 2:nx] - 1.0 / pn[1:L, 0:Mm])
+    dmde[1:L, 1:M] = 0.5 * (1.0 / pm[2:ny, 1:M] - 1.0 / pm[0:Lm, 1:M])
 
     # Fill edges
     dndx[0, :]  = dndx[1, :];    dndx[-1, :]  = dndx[-2, :]

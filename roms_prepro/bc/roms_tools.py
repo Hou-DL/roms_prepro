@@ -45,54 +45,61 @@ def stretching(Vstretching, theta_s, theta_b, hc, N, kgrid):
         # W-points
         s = -1.0 + np.arange(0, N+1) / N
 
+    # Formulas below match grid/vgrid.py (verified against pyroms / ROMS
+    # set_scoord). hc is accepted for MATLAB-signature compatibility but is
+    # not used in C(s) — it only enters set_depth.
     if Vstretching == 1:
         # Song and Haidvogel (1994)
         if theta_s > 0:
-            Cs = (1 - np.cosh(theta_s * s)) / (np.cosh(theta_s) - 1)
+            Ptheta = np.sinh(theta_s * s) / np.sinh(theta_s)
+            Rtheta = (np.tanh(theta_s * (s + 0.5)) /
+                      (2.0 * np.tanh(0.5 * theta_s)) - 0.5)
+            Cs = (1.0 - theta_b) * Ptheta + theta_b * Rtheta
         else:
-            Cs = -s**2
+            Cs = s.copy()
     elif Vstretching == 2:
         # Shchepetkin and McWilliams (2005)
         if theta_s > 0:
-            Csur = (1 - np.cosh(theta_s * s)) / (np.cosh(theta_s) - 1)
+            Csur = (1.0 - np.cosh(theta_s * s)) / (np.cosh(theta_s) - 1.0)
+            if theta_b > 0:
+                Cbot = (np.sinh(theta_b * (s + 1.0)) / np.sinh(theta_b)) - 1.0
+                weight = (s + 1.0) * (1.0 + (1.0 - (s + 1.0)))  # alfa=beta=1
+                Cs = weight * Csur + (1.0 - weight) * Cbot
+            else:
+                Cs = Csur
         else:
-            Csur = -s**2
-        if theta_b > 0:
-            Cbot = (np.exp(theta_b * Csur) - 1) / (1 - np.exp(-theta_b))
-            Cs = Cbot
-        else:
-            Cs = Csur
+            Cs = s.copy()
     elif Vstretching == 3:
-        # Shchepetkin (2008) - UCLA-ROMS
+        # Geyer et al. (2009) BBL
         if theta_s > 0:
-            Csur = (1 - np.cosh(theta_s * s)) / (np.cosh(theta_s) - 1)
+            alpha = 3.0  # scale factor for the hyperbolic functions
+            Cbot = (np.log(np.cosh(alpha * (s + 1.0) ** theta_b)) /
+                    np.log(np.cosh(alpha))) - 1.0
+            Csur = (-np.log(np.cosh(alpha * np.abs(s) ** theta_s)) /
+                    np.log(np.cosh(alpha)))
+            weight = (1.0 - np.tanh(alpha * (s + 0.5))) / 2.0
+            Cs = weight * Cbot + (1.0 - weight) * Csur
         else:
-            Csur = -s**2
-        if theta_b > 0:
-            Cbot = (np.exp(theta_b * Csur) - 1) / (1 - np.exp(-theta_b))
-            Cs = Cbot
-        else:
-            Cs = Csur
+            Cs = s.copy()
     elif Vstretching == 4:
         # A. Shchepetkin (2010) - UCLA-ROMS
         if theta_s > 0:
-            Csur = (1 - np.cosh(theta_s * s)) / (np.cosh(theta_s) - 1)
+            Csur = (1.0 - np.cosh(theta_s * s)) / (np.cosh(theta_s) - 1.0)
         else:
             Csur = -s**2
         if theta_b > 0:
-            Cbot = (np.exp(theta_b * Csur) - 1) / (1 - np.exp(-theta_b))
-            Cs = Cbot
+            Cs = (np.exp(theta_b * Csur) - 1.0) / (1.0 - np.exp(-theta_b))
         else:
             Cs = Csur
     elif Vstretching == 5:
-        # Geyer et al. (2009)
+        # Powell et al. surface-focused stretching (uniform-s variant)
         if theta_s > 0:
-            Csur = (1 - np.cosh(theta_s * s)) / (np.cosh(theta_s) - 1)
+            Csur = (1.0 - np.cosh(theta_s * s)) / (np.cosh(theta_s) - 1.0)
         else:
             Csur = -s**2
         if theta_b > 0:
-            Cbot = (np.exp(theta_b * Csur) - 1) / (1 - np.exp(-theta_b))
-            Cs = Cbot
+            Cs = (np.exp(theta_b * (Csur + 1.0)) - 1.0) / \
+                 (np.exp(theta_b) - 1.0) - 1.0
         else:
             Cs = Csur
     else:
@@ -127,7 +134,9 @@ def set_depth(Vtransform, Vstretching, theta_s, theta_b, hc, N, igrid, h, ssh):
     z : ndarray
         3D深度数组
     """
-    s, Cs = stretching(Vstretching, theta_s, theta_b, hc, N, igrid)
+    # kgrid selects RHO-points (0) or W-points (1); igrid 1/3/4 are RHO-type
+    # staggered grids, only igrid 5 (W) uses the interface levels.
+    s, Cs = stretching(Vstretching, theta_s, theta_b, hc, N, 1 if igrid == 5 else 0)
     
     h = np.atleast_2d(h)
     ssh = np.atleast_2d(ssh)

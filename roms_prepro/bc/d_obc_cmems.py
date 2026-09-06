@@ -94,7 +94,9 @@ def fill_nan_single(layer):
     nan_mask = np.isnan(layer)
     if not np.any(nan_mask) or np.all(nan_mask):
         return layer
-    _, idx = distance_transform_edt(~nan_mask, return_indices=True)
+    # distance_transform_edt on the NaN mask itself: indices of a NaN cell
+    # then point to the nearest VALID (zero) cell.
+    _, idx = distance_transform_edt(nan_mask, return_indices=True)
     result = layer.copy()
     result[nan_mask] = layer[idx[0][nan_mask], idx[1][nan_mask]]
     return result
@@ -189,15 +191,19 @@ def main():
     Lp, Mp = h.shape
     print(f'  Grid: {Lp} x {Mp} (eta, xi)')
 
-    # 自动读取网格参数（未指定时使用网格文件中的值）
+    # 自动读取网格参数：模块全局为 None 时使用网格文件中的值
     from ..ic._core import _read_vgrid_params
-    _grid_params = _read_vgrid_params(GRD_NAME)
-    _VTRANSFORM = VTRANSFORM if 'VTRANSFORM' not in dir() or VTRANSFORM is not None else _grid_params.get('VTRANSFORM', 2)
-    _VSTRETCHING = VSTRETCHING if 'VSTRETCHING' not in dir() or VSTRETCHING is not None else _grid_params.get('VSTRETCHING', 2)
-    _THETA_S = THETA_S if 'THETA_S' not in dir() or THETA_S is not None else _grid_params.get('theta_s', 2.5)
-    _THETA_B = THETA_B if 'THETA_B' not in dir() or THETA_B is not None else _grid_params.get('theta_b', 1.0)
-    _TCLINE = TCLINE if 'TCLINE' not in dir() or TCLINE is not None else _grid_params.get('Tcline', 25.0)
-    _N_LEVELS = N_LEVELS if 'N_LEVELS' not in dir() or N_LEVELS is not None else _grid_params.get('N', 30)
+    _grid_params = _read_vgrid_params(GRD_NAME) or {}
+
+    def _pick(global_val, key, default):
+        return global_val if global_val is not None else _grid_params.get(key, default)
+
+    _VTRANSFORM = _pick(VTRANSFORM, 'Vtransform', 2)
+    _VSTRETCHING = _pick(VSTRETCHING, 'Vstretching', 4)
+    _THETA_S = _pick(THETA_S, 'theta_s', 2.5)
+    _THETA_B = _pick(THETA_B, 'theta_b', 1.0)
+    _TCLINE = _pick(TCLINE, 'Tcline', 25.0)
+    _N_LEVELS = _pick(N_LEVELS, 'N', 30)
     print(f'  网格参数: Vtransform={_VTRANSFORM}, Vstretching={_VSTRETCHING}, '
           f'theta_s={_THETA_S}, theta_b={_THETA_B}, Tcline={_TCLINE}, N={_N_LEVELS}')
     if _grid_params:
@@ -442,18 +448,21 @@ def main():
             Uv = fill_nan_2d(Uv_all[tstep].copy())
             Vv = fill_nan_2d(Vv_all[tstep].copy())
 
-            # zeta均值修复
+            # zeta: de-mean before interpolation, add the mean back after
+            # (Ze is the FULL SSH field; interpolating it directly and adding
+            #  the mean on top would double the regional mean SSH)
             zeta_mean = np.nanmean(Ze)
+            Ze_anom = Ze - zeta_mean
 
             # ---- 2D：zeta ----
             if e_bound:
-                zeta_east = interp_boundary_2d(Ze, lat_1d, lon_1d, lat_east, lon_east) + zeta_mean
+                zeta_east = interp_boundary_2d(Ze_anom, lat_1d, lon_1d, lat_east, lon_east) + zeta_mean
             if w_bound:
-                zeta_west = interp_boundary_2d(Ze, lat_1d, lon_1d, lat_west, lon_west) + zeta_mean
+                zeta_west = interp_boundary_2d(Ze_anom, lat_1d, lon_1d, lat_west, lon_west) + zeta_mean
             if s_bound:
-                zeta_south = interp_boundary_2d(Ze, lat_1d, lon_1d, lat_south, lon_south) + zeta_mean
+                zeta_south = interp_boundary_2d(Ze_anom, lat_1d, lon_1d, lat_south, lon_south) + zeta_mean
             if n_bound:
-                zeta_north = interp_boundary_2d(Ze, lat_1d, lon_1d, lat_north, lon_north) + zeta_mean
+                zeta_north = interp_boundary_2d(Ze_anom, lat_1d, lon_1d, lat_north, lon_north) + zeta_mean
 
             # ---- 3D：temp/salt/u/v ----
             if e_bound:
