@@ -1,7 +1,7 @@
 from roms_prepro.remapping import process_file
 
 # 最简：全自动（变量自动检测 temp/salt/u/v/AK*，深度用默认标准层）
-process_file('/data/hdl/test/ocean_avg_0003.nc', '/data/hdl/test/ocean_avg_0003_z.nc')
+process_file('Z:/hdl/test/ocean_avg_0003.nc', 'Z:/hdl/test/ocean_avg_0003_z.nc')
 
 # # 完整：指定变量 + 指定深度 + 覆盖垂直参数（只需给出要覆盖的键）
 # process_file('/data/hdl/test/ocean_avg_0003.nc', 'out_z.nc',
