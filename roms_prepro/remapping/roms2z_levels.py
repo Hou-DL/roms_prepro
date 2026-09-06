@@ -7,7 +7,8 @@ from sigma coordinates to fixed z-levels.
 Standard depth levels (default):
     0, 5, 10, 15, ..., 100, 125, 150, ..., 500, 550, ..., 5000, 5500 m
 
-Usage (Python) — one-click with auto-detected vertical parameters:
+Usage (Python) — one-click: temp/salt/u/v interpolated to z, zeta
+copied as a 2-D surface field, vertical parameters auto-detected:
     from roms_prepro.remapping import process_file
     process_file('ocean_avg_0003.nc', 'output.nc')
 
@@ -177,8 +178,10 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
     suffix : str
         Output filename suffix when output_file is not specified.
     variables : list of str, optional
-        Variables to interpolate, e.g. ['temp', 'salt', 'u', 'v'].
-        None = auto-detect among temp/salt/u/v/AKv/AKs/AKt.
+        Variables to process. None = ROMS-standard default set
+        ['temp', 'salt', 'u', 'v', 'zeta'].  3-D fields (on s_rho/s_w)
+        are interpolated to z; 2-D fields such as zeta are copied
+        as-is without vertical interpolation.
     vgrid_params : dict, optional
         Vertical coordinate overrides, e.g.
         {'Vtransform': 2, 'Vstretching': 4, 'theta_s': 7.0, 'theta_b': 0.1,
@@ -263,6 +266,27 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
             return set_depth(Vtransform, Vstretching, theta_s, theta_b, hc, N,
                              h_in, zeta=zeta_in, igrid=igrid)
 
+        # Variables to write: caller-selected or ROMS-standard default set.
+        # 3-D fields (s_rho/s_w) are interpolated to z; 2-D fields such as
+        # zeta (surface elevation) are copied as-is without interpolation.
+        if variables is None:
+            var_list = ['temp', 'salt', 'u', 'v', 'zeta']
+        else:
+            var_list = list(dict.fromkeys(variables))  # de-dup, keep order
+        missing = [v for v in var_list if v not in ds.variables]
+        if missing:
+            print(f"    WARNING: variables not in input file, skipped: {missing}")
+        var_list = [v for v in var_list if v in ds.variables]
+        if not var_list:
+            print("    ERROR: none of the requested variables exist in the input file")
+            ds.close()
+            return None
+
+        # Staggered dimensions are created only when a requested variable
+        # actually lives on them, so rho-only selections stay lean
+        need_u = any('xi_u' in ds.variables[v_].dimensions for v_ in var_list)
+        need_v = any('eta_v' in ds.variables[v_].dimensions for v_ in var_list)
+
         # Create output dataset
         ds_out = nc4.Dataset(output_file, 'w')
 
@@ -270,10 +294,12 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
         ds_out.createDimension('z', len(std_depths_filtered))
         ds_out.createDimension('eta_rho', eta_rho)
         ds_out.createDimension('xi_rho', xi_rho)
-        ds_out.createDimension('eta_u', eta_rho)
-        ds_out.createDimension('xi_u', xi_rho - 1)
-        ds_out.createDimension('eta_v', eta_rho - 1)
-        ds_out.createDimension('xi_v', xi_rho)
+        if need_u:
+            ds_out.createDimension('eta_u', eta_rho)
+            ds_out.createDimension('xi_u', xi_rho - 1)
+        if need_v:
+            ds_out.createDimension('eta_v', eta_rho - 1)
+            ds_out.createDimension('xi_v', xi_rho)
         ds_out.createDimension('ocean_time', None)
 
         # Coordinate variables
@@ -288,8 +314,13 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
         v.units = time_units
         v.long_name = 'time since initialization'
 
-        # Copy lon/lat
-        for vname in ['lon_rho', 'lat_rho', 'lon_u', 'lat_u', 'lon_v', 'lat_v']:
+        # Copy lon/lat for the grids that are actually written
+        coord_vars = ['lon_rho', 'lat_rho']
+        if need_u:
+            coord_vars += ['lon_u', 'lat_u']
+        if need_v:
+            coord_vars += ['lon_v', 'lat_v']
+        for vname in coord_vars:
             if vname in ds.variables:
                 src_v = ds.variables[vname]
                 dims = src_v.dimensions
@@ -298,59 +329,49 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
                 for attr in src_v.ncattrs():
                     setattr(v_out, attr, getattr(src_v, attr))
 
-        # Variables to interpolate: caller-selected or auto-detected
-        if variables is None:
-            var_list = ['temp', 'salt', 'u', 'v', 'AKv', 'AKs', 'AKt']
-        else:
-            var_list = list(dict.fromkeys(variables))  # de-dup, keep order
-        missing = [v for v in var_list if v not in ds.variables]
-        if missing:
-            print(f"    WARNING: variables not in input file, skipped: {missing}")
-        var_list = [v for v in var_list if v in ds.variables]
-        if not var_list:
-            print("    ERROR: none of the requested variables exist in the input file")
-            ds.close()
-            return None
-
         for var_name in var_list:
-            if var_name not in ds.variables:
-                continue
-
             src_v = ds.variables[var_name]
             var_data = src_v[:]
 
             # Determine grid position from dimensions
             dims = src_v.dimensions
-            if 'xi_u' in dims:
-                igrid = 3  # u-points
-            elif 'eta_v' in dims:
-                igrid = 4  # v-points
-            elif 's_w' in dims:
-                igrid = 5  # w-points
+            has_vertical = ('s_rho' in dims) or ('s_w' in dims)
+
+            if has_vertical:
+                if 'xi_u' in dims:
+                    igrid = 3  # u-points
+                elif 'eta_v' in dims:
+                    igrid = 4  # v-points
+                elif 's_w' in dims:
+                    igrid = 5  # w-points
+                else:
+                    igrid = 1  # rho-points
+
+                # Compute z for this grid position
+                # set_depth handles h/zeta averaging internally for igrid 1-5
+                z_var = np.zeros((ntime, N,) + _get_grid_shape(igrid, eta_rho, xi_rho))
+                for t in range(ntime):
+                    z_var[t] = _compute_depths(igrid, h, zeta[t])
+
+                if igrid == 1:
+                    dims_out = ('ocean_time', 'z', 'eta_rho', 'xi_rho')
+                elif igrid == 3:
+                    dims_out = ('ocean_time', 'z', 'eta_u', 'xi_u')
+                elif igrid == 4:
+                    dims_out = ('ocean_time', 'z', 'eta_v', 'xi_v')
+                else:
+                    dims_out = ('ocean_time', 'z', 'eta_rho', 'xi_rho')
+
+                # Interpolated data
+                var_out = roms_to_z_levels(var_data, z_var, std_depths_filtered, water)
+
+                # Write to output
+                if var_out.ndim == 3:
+                    var_out = var_out[np.newaxis, :]
             else:
-                igrid = 1  # rho-points
-
-            # Compute z for this grid position
-            # set_depth handles h/zeta averaging internally for igrid 1-5
-            z_var = np.zeros((ntime, N,) + _get_grid_shape(igrid, eta_rho, xi_rho))
-            for t in range(ntime):
-                z_var[t] = _compute_depths(igrid, h, zeta[t])
-
-            if igrid == 1:
-                dims_out = ('ocean_time', 'z', 'eta_rho', 'xi_rho')
-            elif igrid == 3:
-                dims_out = ('ocean_time', 'z', 'eta_u', 'xi_u')
-            elif igrid == 4:
-                dims_out = ('ocean_time', 'z', 'eta_v', 'xi_v')
-            else:
-                dims_out = ('ocean_time', 'z', 'eta_rho', 'xi_rho')
-
-            # Interpolated data
-            var_out = roms_to_z_levels(var_data, z_var, std_depths_filtered, water)
-
-            # Write to output
-            if var_out.ndim == 3:
-                var_out = var_out[np.newaxis, :]
+                # 2-D surface field (e.g. zeta): copy without vertical interpolation
+                var_out = var_data
+                dims_out = dims
 
             fill_val = getattr(src_v, '_FillValue', np.nan)
             v_out = ds_out.createVariable(var_name, 'f8', dims_out, fill_value=fill_val)
@@ -423,7 +444,8 @@ def main():
     parser.add_argument('--depths', nargs='+', type=float,
                         help='Custom standard depth levels (meters, positive)')
     parser.add_argument('--vars', nargs='+',
-                        help='Variables to interpolate (default: auto-detect temp/salt/u/v/AK*)')
+                        help='Variables to process (default: temp salt u v zeta; '
+                             'zeta is copied as a 2-D field)')
     parser.add_argument('-j', '--workers', type=int, default=1,
                         help='Number of parallel workers (default: 1)')
 

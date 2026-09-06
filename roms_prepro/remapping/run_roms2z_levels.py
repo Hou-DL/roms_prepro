@@ -81,8 +81,9 @@ CUSTOM_DEPTHS = [
 # 3. 处理选项 / Processing Options
 # ===================================================================
 
-# 要插值的变量: None = 自动检测 (temp/salt/u/v/AKv/AKs/AKt 中存在的)
-# 或显式指定，如 ['temp', 'salt']
+# 要处理的变量: None = 默认 ['temp', 'salt', 'u', 'v', 'zeta']
+#   3D 变量 (s_rho) 插值到 z 层; 2D 变量 (如 zeta 表层) 直接拷贝
+# 或显式指定/裁剪，如 ['temp', 'salt'] / ['temp', 'salt', 'rho', 'AKv']
 VARIABLES = None
 
 # 垂直坐标参数覆盖: None = 自动从输入文件读取
