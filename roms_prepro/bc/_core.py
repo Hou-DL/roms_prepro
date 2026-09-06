@@ -295,9 +295,13 @@ def _put_var(ds, name, data, dims, **attrs):
 
 
 def write_bry_file(filename, metrics, vgrid_params, boundaries,
-                   bry_data, bry_time):
+                   bry_data, bry_time, time_units='seconds since 2000-01-01 00:00:00'):
     """
     Write a standard ROMS boundary conditions NetCDF file.
+
+    bry_data[v] is a list over the 4 boundaries; each entry is
+    (ntime, s_rho, edge_len) for 3-D variables or (ntime, edge_len) for
+    2-D variables.  bry_time are seconds relative to ``time_units``.
     """
     ds = nc4.Dataset(filename, 'w', format='NETCDF3_64BIT')
     ds.Description = 'ROMS boundary conditions'
@@ -306,15 +310,18 @@ def write_bry_file(filename, metrics, vgrid_params, boundaries,
 
     ny, nx = metrics['lon_rho'].shape
 
+    # Detect N from the first available 3-D field: shape (ntime, s_rho, len)
     N = 1
     for v in ['temp', 'salt', 'u', 'v']:
         if v in bry_data:
             for arr in bry_data[v]:
-                if arr is not None and arr.ndim >= 2:
+                if arr is not None and arr.ndim == 3:
                     N = arr.shape[1]
                     break
             if N > 1:
                 break
+    if N <= 1 and 's_rho' in vgrid_params:
+        N = int(np.asarray(vgrid_params['s_rho']).size)
 
     ntime = len(bry_time)
 
@@ -387,7 +394,8 @@ def write_bry_file(filename, metrics, vgrid_params, boundaries,
     def _write_time_var(tvar_name):
         tvar = ds.createVariable(tvar_name, 'f8', (tvar_name,))
         tvar[:] = bry_time
-        tvar.units = 'seconds since 2000-01-01 00:00:00'
+        tvar.units = time_units
+        tvar.calendar = 'gregorian'
         tvar.long_name = tvar_name
         tvar.field = f'{tvar_name}, scalar, series'
         return tvar_name
@@ -622,13 +630,26 @@ def _read_source(file_path,
 
 
 def _read_roms_grid(grid_file):
-    """Read ROMS grid into dict."""
+    """Read ROMS grid into dict (includes vertical coordinate parameters
+    when present in the file, under their standard variable names)."""
     g = nc4.Dataset(grid_file)
     m = {}
     for v in ['h','lon_rho','lat_rho','mask_rho','mask_u','mask_v','angle',
-              'lon_u','lat_u','lon_v','lat_v']:
+              'lon_u','lat_u','lon_v','lat_v',
+              'Vtransform','Vstretching','theta_s','theta_b','Tcline','hc']:
         if v in g.variables:
-            m[v] = g.variables[v][:]
+            val = g.variables[v][:]
+            m[v] = val.item() if val.ndim == 0 else val
+    # some grids store the parameters only as global 'var NAME = VALUE' attrs
+    for v in ['Vtransform','Vstretching','theta_s','theta_b','Tcline','hc']:
+        if v not in m:
+            for attr in g.ncattrs():
+                if attr.replace('var ', '').strip() == v:
+                    try:
+                        m[v] = float(g.getncattr(attr))
+                    except (TypeError, ValueError):
+                        pass
+                    break
     ny, nx = m['lon_rho'].shape
     for e, i in [('west',0),('east',-1)]:
         m[f'lon_rho_{e}'] = m['lon_rho'][:,i]

@@ -596,14 +596,27 @@ def _read_cmems_var(file_path, var_name, time_index=0):
 
 
 def _read_roms_grid(grid_file):
-    """Read ROMS grid into dict."""
+    """Read ROMS grid into dict (includes vertical coordinate parameters
+    when present in the file)."""
     import netCDF4 as nc4
     g = nc4.Dataset(grid_file)
     m = {}
     for v in ['h', 'lon_rho', 'lat_rho', 'mask_rho', 'mask_u', 'mask_v',
-              'angle', 'lon_u', 'lat_u', 'lon_v', 'lat_v']:
+              'angle', 'lon_u', 'lat_u', 'lon_v', 'lat_v',
+              'Vtransform', 'Vstretching', 'theta_s', 'theta_b', 'Tcline', 'hc']:
         if v in g.variables:
-            m[v] = g.variables[v][:]
+            val = g.variables[v][:]
+            m[v] = val.item() if val.ndim == 0 else val
+    # some grids store the parameters only as global 'var NAME = VALUE' attrs
+    for v in ['Vtransform', 'Vstretching', 'theta_s', 'theta_b', 'Tcline', 'hc']:
+        if v not in m:
+            for attr in g.ncattrs():
+                if attr.replace('var ', '').strip() == v:
+                    try:
+                        m[v] = float(g.getncattr(attr))
+                    except (TypeError, ValueError):
+                        pass
+                    break
     g.close()
     return m
 

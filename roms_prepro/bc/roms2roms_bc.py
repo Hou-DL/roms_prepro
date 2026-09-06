@@ -12,24 +12,27 @@ ROMS → ROMS boundary conditions via intermediate standard-z grid.
 
 import os
 import re
+import sys
 import glob
 import numpy as np
 import netCDF4 as nc4
+from datetime import datetime
 
 try:
     from ._core import (horizontal_interp, sigma_to_z, z_to_sigma,
                         rotate_uv, uv_to_cgrid, compute_ubar_vbar,
                         write_bry_file, EDGE_NAMES,
-                        _fill_nan, _parse_date, _get_time, _match_idx,
+                        _fill_nan, _fill_nan_2d, _parse_date, _get_time, _match_idx,
                         _filter_files, _read_roms_grid)
     from ..ic._core import _resolve_vgrid_params
 except ImportError:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
     from _core import (horizontal_interp, sigma_to_z, z_to_sigma,
                        rotate_uv, uv_to_cgrid, compute_ubar_vbar,
                        write_bry_file, EDGE_NAMES,
-                       _fill_nan, _parse_date, _get_time, _match_idx,
+                       _fill_nan, _fill_nan_2d, _parse_date, _get_time, _match_idx,
                        _filter_files, _read_roms_grid)
-    from ..ic._core import _resolve_vgrid_params
+    from ic._core import _resolve_vgrid_params
 
 DEFAULT_Z = np.array([
     -7500, -7000, -6500, -6000, -5500, -5000, -4500, -4000, -3500,
@@ -41,10 +44,13 @@ DEFAULT_Z = np.array([
 
 
 def _get_var(filename, varname, time_idx=0):
-    """Read one variable from a ROMS file."""
+    """Read one variable from a ROMS file (leading time dimension stripped
+    for both 3-D (time,s,eta,xi) and 2-D (time,eta,xi) variables)."""
     ds = nc4.Dataset(filename)
-    arr = ds.variables[varname][:]
-    if arr.ndim == 4:
+    var = ds.variables[varname]
+    arr = var[:]
+    if var.dimensions and var.dimensions[0] in ('ocean_time', 'time',
+                                                'time_counter', 'bry_time'):
         arr = arr[time_idx]
     ds.close()
     return arr
@@ -52,28 +58,34 @@ def _get_var(filename, varname, time_idx=0):
 
 def _remap_var(var_name, src_file, src_grd, src_z_r, src_z_w,
                dst_grd, dst_z_r, dst_z_w, z_levels,
-               src_time=0, spval=1e37):
+               src_time=0, spval=1e37, src_lon=None, src_lat=None):
     """
     Remap one variable from source ROMS to target ROMS via intermediate Z.
+    Source land values (spval) are nearest-neighbour filled before the
+    horizontal interpolation so they cannot pollute coastal cells.
     """
     src_var = _get_var(src_file, var_name, src_time)
-    ndim = 3 if src_var.ndim == 3 else 2
+    src_var = np.where(np.abs(src_var) >= 1e30, np.nan, src_var)
 
-    src_lon = src_grd['lon_rho']
-    src_lat = src_grd['lat_rho']
+    # staggered sources (u/v) pass their own point coordinates
+    src_lon = src_lon if src_lon is not None else src_grd['lon_rho']
+    src_lat = src_lat if src_lat is not None else src_grd['lat_rho']
     dst_lon = dst_grd['lon_rho']
     dst_lat = dst_grd['lat_rho']
     mask = dst_grd['mask_rho']
 
-    if ndim == 2:
+    if src_var.ndim == 2:
+        src_var = _fill_nan_2d(src_var)
         return horizontal_interp(src_lon, src_lat, src_var,
                                  dst_lon, dst_lat, mask=mask,
                                  fill_value=spval)
 
     var_z = sigma_to_z(src_var, src_z_r, z_levels, fill_value=spval)
+    var_z = np.where(np.abs(var_z) >= 1e30, np.nan, var_z)
     var_z_dst = np.zeros((len(z_levels), dst_lon.shape[0], dst_lon.shape[1]))
     for k in range(len(z_levels)):
-        var_z_dst[k] = horizontal_interp(src_lon, src_lat, var_z[k],
+        layer = _fill_nan_2d(var_z[k])
+        var_z_dst[k] = horizontal_interp(src_lon, src_lat, layer,
                                           dst_lon, dst_lat, mask=mask,
                                           fill_value=spval)
     return z_to_sigma(var_z_dst, z_levels, dst_z_r, fill_value=spval)
@@ -211,8 +223,11 @@ def roms_to_roms_bry(src_grid_file, src_hist_files=None, dst_grid_file=None,
     hc = _vgrid['hc']
     N = _vgrid['N']
 
-    src_Vt = int(src_grd.get('Vtransform', 1))
-    src_Vs = int(src_grd.get('Vstretching', 1))
+    src_Vt = int(src_grd.get('Vtransform', 2))
+    src_Vs = int(src_grd.get('Vstretching', 4))
+    src_theta_s = float(src_grd.get('theta_s', 5.0))
+    src_theta_b = float(src_grd.get('theta_b', 0.4))
+    src_Tcline = float(src_grd.get('Tcline', 10.0))
     src_N = 30
     if filtered:
         h = nc4.Dataset(filtered[0][0])
@@ -220,16 +235,14 @@ def roms_to_roms_bry(src_grid_file, src_hist_files=None, dst_grid_file=None,
             src_N = len(h.dimensions['s_rho'])
         h.close()
 
-    src_z_w = set_depth(src_Vt, src_Vs,
-                        src_grd.get('theta_s', 5.0),
-                        src_grd.get('theta_b', 0.4),
-                        src_grd.get('Tcline', 10.0), src_N,
-                        src_grd['h'], igrid=5)
-    src_z_r = set_depth(src_Vt, src_Vs,
-                        src_grd.get('theta_s', 5.0),
-                        src_grd.get('theta_b', 0.4),
-                        src_grd.get('Tcline', 10.0), src_N,
-                        src_grd['h'], igrid=1)
+    src_z_w = set_depth(src_Vt, src_Vs, src_theta_s, src_theta_b,
+                        src_Tcline, src_N, src_grd['h'], igrid=5)
+    src_z_r = set_depth(src_Vt, src_Vs, src_theta_s, src_theta_b,
+                        src_Tcline, src_N, src_grd['h'], igrid=1)
+    src_z_u = set_depth(src_Vt, src_Vs, src_theta_s, src_theta_b,
+                        src_Tcline, src_N, src_grd['h'], igrid=3)
+    src_z_v = set_depth(src_Vt, src_Vs, src_theta_s, src_theta_b,
+                        src_Tcline, src_N, src_grd['h'], igrid=4)
 
     dst_z_w = set_depth(Vtransform, Vstretching, theta_s, theta_b, Tcline,
                         N, dst_grd['h'], igrid=5)
@@ -239,128 +252,106 @@ def roms_to_roms_bry(src_grid_file, src_hist_files=None, dst_grid_file=None,
     spval = 1e37
 
     vmap = var_mapping or {}
-    v = lambda k: vmap.get(k, k)
+    vname_of = lambda k: vmap.get(k, k)
 
-    parent_angle = _remap_var(v('angle'), src_grid_file, src_grd, src_z_r, src_z_w,
+    parent_angle = _remap_var(vname_of('angle'), src_grid_file, src_grd, src_z_r, src_z_w,
                               dst_grd, dst_z_r, dst_z_w, z_levels, 0, spval)
     target_angle = dst_grd.get('angle', np.zeros_like(dst_grd['lat_rho']))
 
+    # time_ref is a plain date ('YYYY-MM-DD[ HH:MM:SS]'); convert source
+    # seconds (since 1970) to seconds relative to this reference
     m = re.search(r'since\s+(.+)', time_ref) if time_ref else None
-    ref_epoch = _parse_date(m.group(1)) if m else 0.0
+    ref_str = m.group(1) if m else (time_ref or '1970-01-01')
+    ref_epoch = _parse_date(ref_str)
+    if ref_epoch is None:
+        ref_epoch = 0.0
+    time_units = f'seconds since {ref_str}'
+    if len(ref_str) == 10:
+        time_units += ' 00:00:00'
 
     total_steps = sum(len(idxs) for _, idxs in filtered)
     bry_time = np.zeros(total_steps)
-    t = 0
 
+    # Boundary masks per variable type (rho/u/v staggered positions)
+    mask_rho_g = dst_grd.get('mask_rho', np.ones_like(dst_grd['h']))
+    ny_g, nx_g = mask_rho_g.shape
+    mask_u_g = dst_grd.get('mask_u', np.ones((ny_g, nx_g - 1)))
+    mask_v_g = dst_grd.get('mask_v', np.ones((ny_g - 1, nx_g)))
+
+    def _edge_mask(grid_mask, edge):
+        if edge in ('west', 'east'):
+            return grid_mask[:, 0 if edge == 'west' else -1]
+        return grid_mask[0 if edge == 'south' else -1, :]
+
+    # Accumulate per-time boundary slices; write the file once at the end
+    out_vars = ['temp', 'salt', 'u', 'v', 'zeta', 'ubar', 'vbar']
+    acc = {vn: {b: [] for b in range(4)} for vn in out_vars}
+
+    t = 0
     for fp, idxs in filtered:
         src_t = _get_time(fp, 'ocean_time')
         for idx in idxs:
             ti = src_t[idx] if src_t is not None else float(t)
             bry_sec = ti - ref_epoch if ref_epoch != 0 else ti
+            bry_time[t] = bry_sec
             print(f"\n[{t + 1}/{total_steps}] {os.path.basename(fp)} "
-                  f"idx={idx}, time={ti:.0f}s since 1970")
+                  f"idx={idx}, bry_time={bry_sec:.0f}s (ref {time_ref})")
 
-            temp = _remap_var(v('temp'), fp, src_grd, src_z_r, src_z_w,
+            temp = _remap_var(vname_of('temp'), fp, src_grd, src_z_r, src_z_w,
                               dst_grd, dst_z_r, dst_z_w, z_levels, idx, spval)
-            salt = _remap_var(v('salt'), fp, src_grd, src_z_r, src_z_w,
+            salt = _remap_var(vname_of('salt'), fp, src_grd, src_z_r, src_z_w,
                               dst_grd, dst_z_r, dst_z_w, z_levels, idx, spval)
-            zeta = _remap_var(v('zeta'), fp, src_grd, src_z_r, src_z_w,
+            zeta = _remap_var(vname_of('zeta'), fp, src_grd, src_z_r, src_z_w,
                               dst_grd, dst_z_r, dst_z_w, z_levels, idx, spval)
-            u_rho = _remap_var(v('u'), fp, src_grd, src_z_r, src_z_w,
-                               dst_grd, dst_z_r, dst_z_w, z_levels, idx, spval)
-            v_rho = _remap_var(v('v'), fp, src_grd, src_z_r, src_z_w,
-                               dst_grd, dst_z_r, dst_z_w, z_levels, idx, spval)
+            u_rho = _remap_var(vname_of('u'), fp, src_grd, src_z_u, src_z_w,
+                               dst_grd, dst_z_r, dst_z_w, z_levels, idx, spval,
+                               src_lon=src_grd.get('lon_u'), src_lat=src_grd.get('lat_u'))
+            v_rho = _remap_var(vname_of('v'), fp, src_grd, src_z_v, src_z_w,
+                               dst_grd, dst_z_r, dst_z_w, z_levels, idx, spval,
+                               src_lon=src_grd.get('lon_v'), src_lat=src_grd.get('lat_v'))
 
             u_rho, v_rho = rotate_uv(u_rho, v_rho, parent_angle, target_angle)
-            u, v = uv_to_cgrid(u_rho, v_rho, dst_grd.get('mask_u'),
-                               dst_grd.get('mask_v'), spval)
-            ubar, vbar = compute_ubar_vbar(u, v, dst_z_w,
-                                           dst_grd.get('mask_u'),
-                                           dst_grd.get('mask_v'))
+            u, v = uv_to_cgrid(u_rho, v_rho, mask_u_g, mask_v_g, spval)
+            ubar, vbar = compute_ubar_vbar(u, v, dst_z_w, mask_u_g, mask_v_g)
 
-            edge_data = {}
-            for name in ['temp', 'salt']:
-                f3d = locals()[name]
-                edge_data[name] = [None] * 4
+            fields3d = {'temp': temp, 'salt': salt, 'u': u, 'v': v}
+            fields2d = {'zeta': zeta, 'ubar': ubar, 'vbar': vbar}
+            var_masks = {'temp': mask_rho_g, 'salt': mask_rho_g,
+                         'u': mask_u_g, 'v': mask_v_g,
+                         'zeta': mask_rho_g, 'ubar': mask_u_g, 'vbar': mask_v_g}
+
+            for vn, fld in list(fields3d.items()) + list(fields2d.items()):
                 for b, active in enumerate(boundaries):
                     if not active:
                         continue
                     edge = EDGE_NAMES[b]
                     if edge in ('west', 'east'):
                         ix = 0 if edge == 'west' else -1
-                        edge_data[name][b] = f3d[:, :, ix]
+                        sl = fld[:, :, ix] if vn in fields3d else fld[:, ix]
                     else:
                         ix = 0 if edge == 'south' else -1
-                        edge_data[name][b] = f3d[:, ix, :]
-
-            for name, f3d, vname in [('u', u, 'u'), ('v', v, 'v')]:
-                edge_data[vname] = [None] * 4
-                for b, active in enumerate(boundaries):
-                    if not active:
-                        continue
-                    edge = EDGE_NAMES[b]
-                    if edge in ('west', 'east'):
-                        ix = 0 if edge == 'west' else -1
-                        edge_data[vname][b] = f3d[:, :, ix]
+                        sl = fld[:, ix, :] if vn in fields3d else fld[ix, :]
+                    sl = sl.copy()
+                    bm = _edge_mask(var_masks[vn], edge)
+                    if vn in fields3d:
+                        sl[:, bm == 0] = spval   # slice is (N, edge_len)
                     else:
-                        ix = 0 if edge == 'south' else -1
-                        edge_data[vname][b] = f3d[:, ix, :]
-
-            for name, f2d in [('zeta', zeta), ('ubar', ubar), ('vbar', vbar)]:
-                edge_data[name] = [None] * 4
-                for b, active in enumerate(boundaries):
-                    if not active:
-                        continue
-                    edge = EDGE_NAMES[b]
-                    if edge in ('west', 'east'):
-                        ix = 0 if edge == 'west' else -1
-                        edge_data[name][b] = f2d[:, ix]
-                    else:
-                        ix = 0 if edge == 'south' else -1
-                        edge_data[name][b] = f2d[ix, :]
-
-            src_time = _get_var(fp, 'ocean_time', 0)
-            bry_time[t] = float(np.atleast_1d(src_time)[0])
-
-            # 陆地点设为 fill_value（与 cmems_bc 一致）
-            fill_val = 1e37
-            for b, active in enumerate(boundaries):
-                if not active:
-                    continue
-                edge = EDGE_NAMES[b]
-
-                # 获取对应边界的 mask
-                if edge in ('west', 'east'):
-                    bm = dst_grd.get('mask_rho', np.ones_like(dst_grd['h']))[:, 0 if edge == 'west' else -1]
-                else:
-                    bm = dst_grd.get('mask_rho', np.ones_like(dst_grd['h']))[0 if edge == 'south' else -1, :]
-
-                for vn in edge_data:
-                    if edge_data[vn][b] is None:
-                        continue
-                    if vn in ('zeta', 'ubar', 'vbar'):
-                        edge_data[vn][b][bm == 0] = fill_val
-                    else:
-                        edge_data[vn][b][bm == 0] = fill_val
-
-            if t == 0:
-                vgrid_params = {'Vtransform': Vtransform, 'Vstretching': Vstretching,
-                                'theta_s': theta_s, 'theta_b': theta_b,
-                                'Tcline': Tcline, 'hc': Tcline}
-                write_bry_file(bry_file, dst_grd, vgrid_params, boundaries,
-                               edge_data, bry_time[:t + 1])
-            else:
-                ds = nc4.Dataset(bry_file, 'a')
-                ds.variables['bry_time'][t] = bry_time[t]
-                for var_name in edge_data:
-                    for b, active in enumerate(boundaries):
-                        if not active or edge_data[var_name][b] is None:
-                            continue
-                        edge = EDGE_NAMES[b]
-                        key = f'{var_name}_{edge}'
-                        ds.variables[key][t] = edge_data[var_name][b]
-                ds.close()
+                        sl[bm == 0] = spval      # slice is (edge_len,)
+                    acc[vn][b].append(sl)
 
             t += 1
+
+    # Stack accumulated slices: (ntime, s_rho, edge_len) / (ntime, edge_len)
+    edge_data = {vn: [None] * 4 for vn in out_vars}
+    for vn in out_vars:
+        for b, active in enumerate(boundaries):
+            if active and acc[vn][b]:
+                edge_data[vn][b] = np.stack(acc[vn][b], axis=0)
+
+    vgrid_params = {'Vtransform': Vtransform, 'Vstretching': Vstretching,
+                    'theta_s': theta_s, 'theta_b': theta_b,
+                    'Tcline': Tcline, 'hc': Tcline}
+    write_bry_file(bry_file, dst_grd, vgrid_params, boundaries,
+                   edge_data, bry_time, time_units=time_units)
 
     print(f"\nWritten: {bry_file}")

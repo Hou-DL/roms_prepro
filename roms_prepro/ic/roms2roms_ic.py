@@ -19,6 +19,7 @@ from ._core import (
     _read_roms_grid, _resolve_vgrid_params, set_depth, stretching,
     horizontal_interp, sigma_to_z, z_to_sigma,
     rotate_uv, uv_to_cgrid, compute_ubar_vbar_legacy,
+    fill_nan_2d,
     _detect_time_units, _parse_date, _get_time, _match_idx,
     _write_ic_netcdf, FILL_VAL,
 )
@@ -33,10 +34,13 @@ DEFAULT_Z = np.array([
 
 
 def _get_var(filename, varname, time_idx=0):
-    """Read one variable from a ROMS file."""
+    """Read one variable from a ROMS file (leading time dimension stripped
+    for both 3-D (time,s,eta,xi) and 2-D (time,eta,xi) variables)."""
     ds = nc4.Dataset(filename)
-    arr = ds.variables[varname][:]
-    if arr.ndim == 4:
+    var = ds.variables[varname]
+    arr = var[:]
+    if var.dimensions and var.dimensions[0] in ('ocean_time', 'time',
+                                                'time_counter', 'bry_time'):
         arr = arr[time_idx]
     ds.close()
     return arr
@@ -44,24 +48,28 @@ def _get_var(filename, varname, time_idx=0):
 
 def _remap_var(var_name, src_file, src_grd, src_z_r, src_z_w,
                dst_grd, dst_z_r, dst_z_w, z_levels,
-               src_time=0, spval=1e37):
+               src_time=0, spval=1e37, src_lon=None, src_lat=None):
     """
     Remap one variable from source ROMS to target ROMS via intermediate Z.
 
+    Source land values (spval) are nearest-neighbour filled before the
+    horizontal interpolation so they cannot pollute coastal cells.
     src_z_r, src_z_w: sigma depths for source (nlat, nlon, N) and (nlat, nlon, N+1)
     dst_z_r, dst_z_w: same for target
     z_levels: 1D array of standard z-levels (negative, descending)
     """
     src_var = _get_var(src_file, var_name, src_time)
-    ndim = 3 if src_var.ndim == 3 else 2
+    src_var = np.where(np.abs(src_var) >= 1e30, np.nan, src_var)
 
-    src_lon = src_grd['lon_rho']
-    src_lat = src_grd['lat_rho']
+    # staggered sources (u/v) pass their own point coordinates
+    src_lon = src_lon if src_lon is not None else src_grd['lon_rho']
+    src_lat = src_lat if src_lat is not None else src_grd['lat_rho']
     dst_lon = dst_grd['lon_rho']
     dst_lat = dst_grd['lat_rho']
     mask = dst_grd['mask_rho']
 
-    if ndim == 2:
+    if src_var.ndim == 2:
+        src_var = fill_nan_2d(src_var)
         return horizontal_interp(src_lon, src_lat, src_var,
                                  dst_lon, dst_lat, mask=mask,
                                  fill_value=spval)
@@ -72,9 +80,11 @@ def _remap_var(var_name, src_file, src_grd, src_z_r, src_z_w,
     dst_z_r_t = dst_z_r.transpose(2, 0, 1)
 
     var_z = sigma_to_z(src_var, src_z_r_t, z_levels, fill_value=spval)
+    var_z = np.where(np.abs(var_z) >= 1e30, np.nan, var_z)
     var_z_dst = np.zeros((len(z_levels), dst_lon.shape[0], dst_lon.shape[1]))
     for k in range(len(z_levels)):
-        var_z_dst[k] = horizontal_interp(src_lon, src_lat, var_z[k],
+        layer = fill_nan_2d(var_z[k])
+        var_z_dst[k] = horizontal_interp(src_lon, src_lat, layer,
                                           dst_lon, dst_lat, mask=mask,
                                           fill_value=spval)
     return z_to_sigma(var_z_dst, z_levels, dst_z_r_t, fill_value=spval)
@@ -202,34 +212,47 @@ def roms_to_roms_ini(src_grid_file, src_hist_file=None, dst_grid_file=None,
         print(f"  init_date={init_date} -> time index {src_time}")
     ocean_time_val = src_times[src_time] if (init_date and src_times is not None) else 0.0
 
-    # Compute ocean_time
-    from datetime import datetime
-    m = re.search(r'since\s+(.+)', time_ref)
-    if m:
-        ref_epoch = _parse_date(m.group(1))
-    else:
-        ref_epoch = _parse_date(time_ref)
+    # Compute ocean_time — relative to the date-only reference the writer
+    # will declare (writer appends ' 00:00:00')
+    try:
+        _ref_dt = _dt.strptime(time_ref, '%Y-%m-%d %H:%M:%S')
+        time_ref_out = _ref_dt.strftime('%Y-%m-%d')
+    except (ValueError, TypeError):
+        try:
+            _dt.strptime(time_ref, '%Y-%m-%d')
+            time_ref_out = time_ref
+        except (ValueError, TypeError):
+            time_ref_out = '1990-01-01'
+    ref_epoch = _parse_date(time_ref_out)
     if ref_epoch is not None and src_times is not None:
         ocean_time_val = float(src_times[src_time] - ref_epoch)
 
     ocean_time = float(ocean_time_val)
 
-    # Source vertical grid
+    # Source vertical grid — parameters read from the source grid file
     src_N = N
     ds_tmp = nc4.Dataset(first_file)
     if 's_rho' in ds_tmp.dimensions:
         src_N = len(ds_tmp.dimensions['s_rho'])
     ds_tmp.close()
 
-    src_z_w = set_depth(2, 4,
-                        src_grd.get('theta_s', 5.0),
-                        src_grd.get('theta_b', 0.4),
-                        src_grd.get('Tcline', 10.0), src_N, 5,
+    src_Vt = int(src_grd.get('Vtransform', 2))
+    src_Vs = int(src_grd.get('Vstretching', 4))
+    src_theta_s = float(src_grd.get('theta_s', 5.0))
+    src_theta_b = float(src_grd.get('theta_b', 0.4))
+    src_Tcline = float(src_grd.get('Tcline', 10.0))
+
+    src_z_w = set_depth(src_Vt, src_Vs, src_theta_s, src_theta_b,
+                        src_Tcline, src_N, 5,
                         src_grd['h'], np.zeros_like(src_grd['h']))
-    src_z_r = set_depth(2, 4,
-                        src_grd.get('theta_s', 5.0),
-                        src_grd.get('theta_b', 0.4),
-                        src_grd.get('Tcline', 10.0), src_N, 1,
+    src_z_r = set_depth(src_Vt, src_Vs, src_theta_s, src_theta_b,
+                        src_Tcline, src_N, 1,
+                        src_grd['h'], np.zeros_like(src_grd['h']))
+    src_z_u = set_depth(src_Vt, src_Vs, src_theta_s, src_theta_b,
+                        src_Tcline, src_N, 3,
+                        src_grd['h'], np.zeros_like(src_grd['h']))
+    src_z_v = set_depth(src_Vt, src_Vs, src_theta_s, src_theta_b,
+                        src_Tcline, src_N, 4,
                         src_grd['h'], np.zeros_like(src_grd['h']))
 
     # Target vertical grid
@@ -249,18 +272,20 @@ def roms_to_roms_ini(src_grid_file, src_hist_file=None, dst_grid_file=None,
     v = lambda k: vmap.get(k, k)
 
     print("Remapping 3D ...")
-    temp = _remap_var(v('temp'), src_hist_file, src_grd, src_z_r, src_z_w,
+    temp = _remap_var(v('temp'), first_file, src_grd, src_z_r, src_z_w,
                       dst_grd, dst_z_r, dst_z_w, z_levels, src_time, spval)
-    salt = _remap_var(v('salt'), src_hist_file, src_grd, src_z_r, src_z_w,
+    salt = _remap_var(v('salt'), first_file, src_grd, src_z_r, src_z_w,
                       dst_grd, dst_z_r, dst_z_w, z_levels, src_time, spval)
-    zeta = _remap_var(v('zeta'), src_hist_file, src_grd, src_z_r, src_z_w,
+    zeta = _remap_var(v('zeta'), first_file, src_grd, src_z_r, src_z_w,
                       dst_grd, dst_z_r, dst_z_w, z_levels, src_time, spval)
 
     print("Remapping velocity ...")
-    u_rho = _remap_var(v('u'), src_hist_file, src_grd, src_z_r, src_z_w,
-                       dst_grd, dst_z_r, dst_z_w, z_levels, src_time, spval)
-    v_rho = _remap_var(v('v'), src_hist_file, src_grd, src_z_r, src_z_w,
-                       dst_grd, dst_z_r, dst_z_w, z_levels, src_time, spval)
+    u_rho = _remap_var(v('u'), first_file, src_grd, src_z_u, src_z_w,
+                       dst_grd, dst_z_r, dst_z_w, z_levels, src_time, spval,
+                       src_lon=src_grd.get('lon_u'), src_lat=src_grd.get('lat_u'))
+    v_rho = _remap_var(v('v'), first_file, src_grd, src_z_v, src_z_w,
+                       dst_grd, dst_z_r, dst_z_w, z_levels, src_time, spval,
+                       src_lon=src_grd.get('lon_v'), src_lat=src_grd.get('lat_v'))
 
     # Rotate: source -> true N/E -> target
     u_rho, v_rho = rotate_uv(u_rho, v_rho, parent_angle, target_angle)
@@ -287,23 +312,15 @@ def roms_to_roms_ini(src_grid_file, src_hist_file=None, dst_grid_file=None,
     v[wm3d_v == 0] = spval
     vbar[dst_grd.get('mask_v', np.ones_like(dst_grd['mask_rho'])) == 0] = spval
 
-    # Write output — normalize time_ref for writer (it appends ' 00:00:00')
-    try:
-        _ref_dt = _dt.strptime(time_ref, '%Y-%m-%d %H:%M:%S')
-        time_ref_out = _ref_dt.strftime('%Y-%m-%d')
-    except (ValueError, TypeError):
-        try:
-            _ref_dt = _dt.strptime(time_ref, '%Y-%m-%d')
-            time_ref_out = time_ref
-        except (ValueError, TypeError):
-            time_ref_out = '1990-01-01'
-
+    # Write output — the IC writer expects 3-D fields as (eta, xi, s_rho)
     _write_ic_netcdf(ini_file, dst_grd['h'],
                      dst_grd['lon_rho'], dst_grd['lat_rho'],
                      dst_grd['lon_u'], dst_grd['lat_u'],
                      dst_grd['lon_v'], dst_grd['lat_v'],
                      ocean_time, theta_s, theta_b, Tcline, Tcline,
-                     N, zeta, ubar, vbar, u, v, temp, salt,
+                     N, zeta, ubar, vbar,
+                     u.transpose(1, 2, 0), v.transpose(1, 2, 0),
+                     temp.transpose(1, 2, 0), salt.transpose(1, 2, 0),
                      Vtransform, Vstretching, time_ref_out)
     print(f"Written: {ini_file}")
     return {'zeta': zeta, 'temp': temp, 'salt': salt, 'u': u, 'v': v,
