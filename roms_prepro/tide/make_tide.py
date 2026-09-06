@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import netCDF4 as nc
 from datetime import datetime
@@ -122,7 +123,7 @@ def tpxo_to_roms_tide(roms_grid_file, out_file, t0, ndays=365,
         inc[:, :, ki] = inc_i
         phase[:, :, ki] = pha_i
 
-    minor = major * np.abs(ecc)
+    minor = major * ecc  # sign = rotation sense (clockwise if negative)
 
     # --- 输出 ---
     print(f'Writing {out_file}...')
@@ -138,12 +139,28 @@ def tpxo_to_roms_tide(roms_grid_file, out_file, t0, ndays=365,
 
 def _datetime_to_datenum(dt):
     """datetime -> MATLAB datenum（天数，从 0000-01-01 起）。"""
-    return dt.toordinal() + (dt.hour + dt.minute / 60 + dt.second / 3600) / 24.0
+    # MATLAB datenum = proleptic ordinal + 366 (datenum('2000-01-01') == 730486)
+    return dt.toordinal() + 366 + (dt.hour + dt.minute / 60 + dt.second / 3600) / 24.0
 
 
 # ---------------------------------------------------------------------------
 # TPXO 数据读取
 # ---------------------------------------------------------------------------
+
+def _find_tpxo_file(tpxo_dir, basename):
+    """按候选名查找 TPXO 文件（兼容带/不带 _v1 后缀的发行版命名）。"""
+    candidates = [basename,
+                  basename.replace('.nc', '_v1.nc'),
+                  basename.replace('_tpxo8_atlas_30c', '_tpxo8atlas_30c'),
+                  basename.replace('.nc', '_v2.nc')]
+    for c in candidates:
+        path = os.path.join(tpxo_dir, c)
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(
+        f"TPXO file not found: {os.path.join(tpxo_dir, basename)} "
+        f"(also tried {candidates[1:]})")
+
 
 def _read_tpxo_data(tpxo_dir, constituents, lonR, latR, bndx, bndy):
     """读取 TPXO8 atlas_30 数据并裁剪到 ROMS 区域。"""
@@ -152,7 +169,7 @@ def _read_tpxo_data(tpxo_dir, constituents, lonR, latR, bndx, bndy):
     margin = 0.5
 
     # 读取 TPXO 网格
-    grd = nc.Dataset(f'{tpxo_dir}/grid_tpxo8atlas_30.nc')
+    grd = nc.Dataset(_find_tpxo_file(tpxo_dir, 'grid_tpxo8atlas_30.nc'))
     lon_z = grd.variables['lon_z'][:]
     lat_z = grd.variables['lat_z'][:]
     lon_u = grd.variables['lon_u'][:]
@@ -223,8 +240,10 @@ def _read_tpxo_data(tpxo_dir, constituents, lonR, latR, bndx, bndy):
         result['z'] = re_grid
         return result
 
-    h_files = [(c, f'{tpxo_dir}/hf.{c.lower()}_tpxo8_atlas_30c.nc') for c in constituents]
-    uv_files = [(c, f'{tpxo_dir}/uv.{c.lower()}_tpxo8_atlas_30c.nc') for c in constituents]
+    h_files = [(c, _find_tpxo_file(tpxo_dir, f'hf.{c.lower()}_tpxo8_atlas_30c.nc'))
+               for c in constituents]
+    uv_files = [(c, _find_tpxo_file(tpxo_dir, f'uv.{c.lower()}_tpxo8_atlas_30c.nc'))
+                for c in constituents]
 
     tpxo = {}
     tpxo['h'] = _process('h', J_z, I_z, X_z, Y_z, hz, h_files)
@@ -355,7 +374,10 @@ def _vphase(dnum, constituents):
     result = []
     for con in constituents:
         DN = TPXOHARMONICS[con]
-        V = (t_hour * DN[7] + Vs * DN[1] + Vh * DN[2] +
+        # Doodson hour angle is 15*n1 deg/hour; using the constituent
+        # frequency sigma (DN[7]) double-counts the slow astronomical terms
+        # (error grows with the hour of the reference time)
+        V = (t_hour * 15.0 * DN[0] + Vs * DN[1] + Vh * DN[2] +
              Vp * DN[3] + VN * DN[4] + Vp1 * DN[5] + DN[6])
         V = np.mod(V, 360)
         result.append(V)
@@ -415,7 +437,7 @@ def _write_tide_nc(fn, L, M, N, constituents, periods,
     ROMStitle = f'ROMS TPXO data for {ini_date.strftime("%b %d %Y")}'
     ds.title = ROMStitle
     ds.Creation_date = ini_date.strftime('%Y%m%d')
-    ds.grd_file = fn
+    ds.grd_file = roms_grid_file
     ds.type = 'ROMS forcing file from TPXO'
     dnum = _datetime_to_datenum(ini_date)
     ds.ini_date_datenumber = dnum
@@ -429,7 +451,11 @@ def _write_tide_nc(fn, L, M, N, constituents, periods,
     ds.createDimension('xi_rho', M)
 
     # zero_phase_date（ROMS 惯例）
-    zpd = float(ini_date.strftime('%Y%m%d.%f'))
+    # %f gives microseconds (always 000000); encode the time-of-day as a
+    # fractional day instead so a 12:00 reference survives the round trip
+    zpd = (float(ini_date.strftime('%Y%m%d')) +
+           (ini_date.hour * 3600 + ini_date.minute * 60 +
+            ini_date.second) / 86400.0)
     zv = ds.createVariable('zero_phase_date', 'f8', ())
     zv.long_name = 'tidal reference date for zero phase'
     zv.units = 'days as %Y%m%d.%f'
