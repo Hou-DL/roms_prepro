@@ -1,12 +1,12 @@
 import numpy as np
 import netCDF4 as nc
-from datetime import datetime, timedelta
-from scipy.interpolate import RegularGridInterpolator
+from datetime import datetime
+from scipy.interpolate import RegularGridInterpolator, NearestNDInterpolator
+from matplotlib.path import Path
 from tqdm import tqdm
 
 
 DEFAULT_CONSTITUENTS = ['M2', 'S2', 'N2', 'K2', 'K1', 'O1', 'P1', 'Q1']
-CONSTITUENTS = DEFAULT_CONSTITUENTS + ['M4']
 
 TPXOHARMONICS = {
     'Q1':  np.array([1, -3,  1,  1,  0,  0, 270, 13.3986607]),
@@ -17,12 +17,33 @@ TPXOHARMONICS = {
     'M2':  np.array([2, -2,  2,  0,  0,  0,   0, 28.9841042]),
     'S2':  np.array([2,  0,  0,  0,  0,  0,   0, 30.0000000]),
     'K2':  np.array([2,  0,  2,  0,  0,  0,   0, 30.0821381]),
-    'M4':  np.array([4, -4,  4,  0,  0,  0,   0, 57.9682083]),
 }
 
 
-def tpxo_to_roms_tide(roms_grid_file, tpxo_dir, out_file,
-                      constituents=None, ini_date=None):
+def tpxo_to_roms_tide(roms_grid_file, out_file, t0, ndays=365,
+                       tpxo_dir=None, constituents=None):
+    """
+    生成 ROMS 潮汐强迫文件（TPXO8 atlas_30 -> ROMS grid）。
+
+    Parameters
+    ----------
+    roms_grid_file : str
+        ROMS 网格文件路径（包含 lon_rho, lat_rho, mask_rho）。
+    out_file : str
+        输出潮汐强迫文件路径。
+    t0 : datetime or str
+        参考时间。datetime 对象或 ISO 格式字符串（如 '2000-01-01'）。
+    ndays : int, optional
+        模拟长度（天），用于计算 nodal 因子的参考时间 t0 + ndays/2。默认 365。
+    tpxo_dir : str, optional
+        TPXO 数据目录。默认与 roms_grid_file 同目录。
+    constituents : list of str, optional
+        分潮列表。默认 ['M2','S2','N2','K2','K1','O1','P1','Q1']。
+    """
+    # --- 参数处理 ---
+    if isinstance(t0, str):
+        t0 = datetime.fromisoformat(t0.replace(' ', 'T'))
+
     if constituents is None:
         constituents = [c for c in DEFAULT_CONSTITUENTS if c in TPXOHARMONICS]
 
@@ -30,44 +51,37 @@ def tpxo_to_roms_tide(roms_grid_file, tpxo_dir, out_file,
         if c not in TPXOHARMONICS:
             raise ValueError(f'Unknown constituent: {c}')
 
-    # Read ROMS grid
+    if tpxo_dir is None:
+        import os
+        tpxo_dir = os.path.dirname(roms_grid_file) or '.'
+
+    # --- 读取 ROMS 网格 ---
     g = nc.Dataset(roms_grid_file)
     lonR = np.mod(g.variables['lon_rho'][:], 360)
     latR = g.variables['lat_rho'][:]
     maskR = g.variables['mask_rho'][:]
     g.close()
 
-    # MATLAB: [L,M] = size(mask_psi)
-    # mask_psi = (eta_rho-1, xi_rho-1), so L=eta_rho-1, M=xi_rho-1
-    # Arrays allocated as (L+1, M+1, N) = (eta_rho, xi_rho, N)
     L, M = lonR.shape  # (eta_rho, xi_rho)
     N = len(constituents)
 
-    # --- Extract TPXO data (matching MATLAB readTPXOdata) ---
-    lon_min, lon_max = lonR.min(), lonR.max()
-    lat_min, lat_max = latR.min(), latR.max()
-    # boundary polygon (4 corners of ROMS domain)
+    # --- 边界多边形 ---
     bndx = [lonR[0, 0], lonR[-1, 0], lonR[-1, -1], lonR[0, -1]]
     bndy = [latR[0, 0], latR[-1, 0], latR[-1, -1], latR[0, -1]]
 
+    # --- 读取 TPXO 数据 ---
     tpxo = _read_tpxo_data(tpxo_dir, constituents, lonR, latR, bndx, bndy)
 
-    # --- Nodal factors and equilibrium phase ---
-    if ini_date is not None:
-        t0 = datetime.fromisoformat(ini_date.replace(' ', 'T'))
-    else:
-        t0 = datetime.now()
-    # MATLAB: dnum = datenum(t0) = days since 0000-01-01
-    # Python equivalent: ordinal (day 1 = 01-Jan-0001)
-    dnum = t0.toordinal() + (t0.hour + t0.minute/60 + t0.second/3600) / 24.0
-
-    t_half = dnum + 365 / 2  # t_half = t0 + lengthSim/2 (MATLAB uses t0+15 as default for 30-day sim)
+    # --- Nodal 因子和平衡相位 ---
+    # MATLAB: dnum = datenum(t0)，参考时间 = t0 + ndays/2
+    dnum = _datetime_to_datenum(t0)
+    t_half = dnum + ndays / 2.0
     fFac, uFac = _tpxo_nodal_factors(t_half, constituents)
     Vdeg = _vphase(dnum, constituents)
 
     periods = np.array([360.0 / TPXOHARMONICS[c][7] for c in constituents])
 
-    # --- Interpolate and compute amplitudes/phases ---
+    # --- 分配数组 ---
     zamp = np.zeros((L, M, N))
     zpha = np.zeros((L, M, N))
     uamp = np.zeros((L, M, N))
@@ -81,24 +95,25 @@ def tpxo_to_roms_tide(roms_grid_file, tpxo_dir, out_file,
 
     iswet = maskR == 1
 
+    # --- 插值 + 计算 ---
     pbar = tqdm(enumerate(constituents), desc='Tidal constituents', unit='con', total=N)
     for ki, con in pbar:
-        # Interpolate elevation
-        ei = _interp_tpxo_matlab(tpxo['h'], con, ki, lonR, latR, iswet)
+        # 高程
+        ei = _interp_tpxo(tpxo['h'], ki, lonR, latR, iswet)
         zamp[:, :, ki] = np.abs(ei) * fFac[ki]
         zpha[:, :, ki] = np.mod(-np.angle(ei, deg=False) * 180/np.pi - uFac[ki] - Vdeg[ki], 360)
 
-        # Interpolate U
-        ei = _interp_tpxo_matlab(tpxo['U'], con, ki, lonR, latR, iswet)
+        # U 分量
+        ei = _interp_tpxo(tpxo['U'], ki, lonR, latR, iswet)
         uamp[:, :, ki] = np.abs(ei) * fFac[ki]
         upha[:, :, ki] = np.mod(-np.angle(ei, deg=False) * 180/np.pi - uFac[ki] - Vdeg[ki], 360)
 
-        # Interpolate V
-        ei = _interp_tpxo_matlab(tpxo['V'], con, ki, lonR, latR, iswet)
+        # V 分量
+        ei = _interp_tpxo(tpxo['V'], ki, lonR, latR, iswet)
         vamp[:, :, ki] = np.abs(ei) * fFac[ki]
         vpha[:, :, ki] = np.mod(-np.angle(ei, deg=False) * 180/np.pi - uFac[ki] - Vdeg[ki], 360)
 
-        # ap2ep (MATLAB ap2ep)
+        # 椭圆参数
         maj, ecc_i, inc_i, pha_i = _ap2ep(uamp[:, :, ki], upha[:, :, ki],
                                             vamp[:, :, ki], vpha[:, :, ki])
         ecc_i = np.nan_to_num(ecc_i, 0)
@@ -109,7 +124,7 @@ def tpxo_to_roms_tide(roms_grid_file, tpxo_dir, out_file,
 
     minor = major * np.abs(ecc)
 
-    # --- Write output ---
+    # --- 输出 ---
     print(f'Writing {out_file}...')
     _write_tide_nc(out_file, L, M, N, constituents, periods,
                    zamp, zpha, major, minor, inc, phase,
@@ -118,16 +133,25 @@ def tpxo_to_roms_tide(roms_grid_file, tpxo_dir, out_file,
 
 
 # ---------------------------------------------------------------------------
-# TPXO data reading (matching MATLAB readTPXOdata)
+# 时间转换
+# ---------------------------------------------------------------------------
+
+def _datetime_to_datenum(dt):
+    """datetime -> MATLAB datenum（天数，从 0000-01-01 起）。"""
+    return dt.toordinal() + (dt.hour + dt.minute / 60 + dt.second / 3600) / 24.0
+
+
+# ---------------------------------------------------------------------------
+# TPXO 数据读取
 # ---------------------------------------------------------------------------
 
 def _read_tpxo_data(tpxo_dir, constituents, lonR, latR, bndx, bndy):
-    """Read and prepare TPXO data for interpolation."""
+    """读取 TPXO8 atlas_30 数据并裁剪到 ROMS 区域。"""
     lon_min, lon_max = lonR.min(), lonR.max()
     lat_min, lat_max = latR.min(), latR.max()
     margin = 0.5
 
-    # Read TPXO grid depth
+    # 读取 TPXO 网格
     grd = nc.Dataset(f'{tpxo_dir}/grid_tpxo8atlas_30.nc')
     lon_z = grd.variables['lon_z'][:]
     lat_z = grd.variables['lat_z'][:]
@@ -140,44 +164,37 @@ def _read_tpxo_data(tpxo_dir, constituents, lonR, latR, bndx, bndy):
     hv = grd.variables['hv'][:]
     grd.close()
 
-    # 1D lat/lon → 2D meshgrid (matching: [X,Y] = meshgrid(X1,Y1))
+    # meshgrid: MATLAB [X,Y] = meshgrid(X1,Y1) -> X 是 lon 方向, Y 是 lat 方向
     X_z, Y_z = np.meshgrid(lon_z, lat_z)
     X_u, Y_u = np.meshgrid(lon_u, lat_u)
     X_v, Y_v = np.meshgrid(lon_v, lat_v)
 
-    # Subset with margin
-    # MATLAB: find(Y >= latmin-0.5 & Y <= latmax+0.5 & X >= lonmin-0.5 & X <= lonmax+0.5)
+    # 裁剪索引
     I_z, J_z = np.where((Y_z >= lat_min - margin) & (Y_z <= lat_max + margin) &
                          (X_z >= lon_min - margin) & (X_z <= lon_max + margin))
-    I_z = np.unique(I_z)
-    J_z = np.unique(J_z)
+    I_z, J_z = np.unique(I_z), np.unique(J_z)
 
     I_u, J_u = np.where((Y_u >= lat_min - margin) & (Y_u <= lat_max + margin) &
                          (X_u >= lon_min - margin) & (X_u <= lon_max + margin))
-    I_u = np.unique(I_u)
-    J_u = np.unique(J_u)
+    I_u, J_u = np.unique(I_u), np.unique(J_u)
 
     I_v, J_v = np.where((Y_v >= lat_min - margin) & (Y_v <= lat_max + margin) &
                          (X_v >= lon_min - margin) & (X_v <= lon_max + margin))
-    I_v = np.unique(I_v)
-    J_v = np.unique(J_v)
+    I_v, J_v = np.unique(I_v), np.unique(J_v)
 
-    # inpolygon mask
-    from matplotlib.path import Path
+    # 多边形掩膜
     poly = Path(np.column_stack([bndx, bndy]))
 
     def _process(var, J, I, X, Y, depth_full, const_files):
         """
-        Process TPXO data for one variable (h/U/V).
-        Input X/Y from meshgrid: shape (lat, lon).
-        I = lat indices, J = lon indices.
-        TPXO data (Re, Im, depth) stored as (lon, lat).
-        We keep everything in (lon, lat) order for consistency.
+        处理一个变量（h/U/V）。
+        X/Y 来自 meshgrid，shape 为 (lat, lon)。
+        TPXO 数据 (Re, Im, depth) 存储为 (lon, lat)。
         """
-        # Subset X/Y: meshgrid is (lat, lon), we want (lon, lat) for interpolation
-        x_sub = X[np.ix_(I, J)].T  # (lat_sub, lon_sub) → (lon_sub, lat_sub)
+        # 裁剪: X(I,J) 是 (lat_sub, lon_sub)，转置为 (lon_sub, lat_sub)
+        x_sub = X[np.ix_(I, J)].T
         y_sub = Y[np.ix_(I, J)].T
-        depth_sub = depth_full[np.ix_(J, I)]  # depth is (lon, lat)
+        depth_sub = depth_full[np.ix_(J, I)]  # depth 是 (lon, lat)
 
         mask_sub = poly.contains_points(np.column_stack([x_sub.ravel(), y_sub.ravel()]))
         mask_sub = mask_sub.reshape(x_sub.shape) & (depth_sub > 0)
@@ -196,17 +213,16 @@ def _read_tpxo_data(tpxo_dir, constituents, lonR, latR, bndx, bndy):
             z = Re_sub + 1j * Im_sub
 
             if var == 'h':
-                z = z / 1000.0
+                z = z / 1000.0      # mm -> m
             else:
-                z = z / 10000.0
-                z = z / depth_sub
+                z = z / 10000.0     # cm/s -> m/s (transport)
+                z = z / depth_sub  # transport / depth = velocity
 
             re_grid[ki] = z
 
         result['z'] = re_grid
         return result
 
-    # Group files by var
     h_files = [(c, f'{tpxo_dir}/hf.{c.lower()}_tpxo8_atlas_30c.nc') for c in constituents]
     uv_files = [(c, f'{tpxo_dir}/uv.{c.lower()}_tpxo8_atlas_30c.nc') for c in constituents]
 
@@ -219,31 +235,30 @@ def _read_tpxo_data(tpxo_dir, constituents, lonR, latR, bndx, bndy):
 
 
 # ---------------------------------------------------------------------------
-# Interpolation (matching MATLAB interpTPXO)
+# 插值
 # ---------------------------------------------------------------------------
 
-def _interp_tpxo_matlab(tpxo_var, con, ki, lonR, latR, iswet):
+def _interp_tpxo(tpxo_var, ki, lonR, latR, iswet):
     """
-    Two-step interpolation matching MATLAB interpTPXO:
-    1. scatteredInterpolant('nearest') to fill gaps
-    2. griddedInterpolant for regular grid interpolation
-    Only interpolates to wet points.
+    两步插值（匹配 MATLAB interpTPXO）：
+    1. 最近邻填充（scatteredInterpolant）
+    2. 规则网格插值（griddedInterpolant）
+    仅对湿点插值。
     """
     x = tpxo_var['x']
     y = tpxo_var['y']
     z = tpxo_var['z'][ki]
     m = tpxo_var['mask']
 
-    # Step 1: nearest-neighbor fill (scatteredInterpolant)
+    # 步骤1: 最近邻填充
     pts_valid = np.column_stack([x[m].ravel(), y[m].ravel()])
     vals_valid = z[m].ravel()
     pts_full = np.column_stack([x.ravel(), y.ravel()])
-    from scipy.interpolate import NearestNDInterpolator
     nn = NearestNDInterpolator(pts_valid, vals_valid)
     z_filled = nn(pts_full).reshape(x.shape)
 
-    # Step 2: griddedInterpolant on filled regular grid.
-    # x is (lon, lat): rows share same lon values, cols share same lat values
+    # 步骤2: 规则网格插值
+    # x 是 (lon, lat): 每行共享同一 lon，每列共享同一 lat
     x1d = x[:, 0]
     y1d = y[0, :]
     if x1d[0] > x1d[-1]:
@@ -252,8 +267,6 @@ def _interp_tpxo_matlab(tpxo_var, con, ki, lonR, latR, iswet):
     if y1d[0] > y1d[-1]:
         y1d = y1d[::-1]
         z_filled = z_filled[:, ::-1]
-    # values.shape must be (len(x1d), len(y1d)) = (Nlon, Nlat)
-    # z_filled is (lon, lat) = (Nlon, Nlat) ✓
 
     interp = RegularGridInterpolator(
         (x1d, y1d), z_filled,
@@ -269,13 +282,13 @@ def _interp_tpxo_matlab(tpxo_var, con, ki, lonR, latR, iswet):
 
 
 # ---------------------------------------------------------------------------
-# Nodal factors (matching MATLAB TPXOnodalfactors)
+# Nodal 因子（匹配 MATLAB TPXOnodalfactors）
 # ---------------------------------------------------------------------------
 
 def _tpxo_nodal_factors(dnum, constituents):
     """
-    Compute nodal factors f and u.
-    dnum: ordinal days (MATLAB datenum equivalent)
+    计算 nodal 因子 f 和 u。
+    dnum: MATLAB datenum（从 0000-01-01 起的天数）。
     """
     t = (dnum + 0.5 - datetime(1900, 1, 1).toordinal()) / 36525.0
 
@@ -316,22 +329,19 @@ def _tpxo_nodal_factors(dnum, constituents):
     f_dict['Q1'] = f_dict['O1']
     u_dict['Q1'] = u_dict['O1']
 
-    f_dict['M4'] = f_dict['M2'] ** 2
-    u_dict['M4'] = 2 * u_dict['M2']
-
     f_out = np.array([f_dict[c] for c in constituents])
     u_out = np.array([np.mod(u_dict[c] * 180 / np.pi, 360) for c in constituents])
     return f_out, u_out
 
 
 # ---------------------------------------------------------------------------
-# Equilibrium phase (matching MATLAB Vphase)
+# 平衡相位（匹配 MATLAB Vphase）
 # ---------------------------------------------------------------------------
 
 def _vphase(dnum, constituents):
     """
-    Compute equilibrium phase Vdeg.
-    dnum: ordinal days (MATLAB datenum equivalent)
+    计算平衡相位 Vdeg。
+    dnum: MATLAB datenum。
     """
     t = (dnum + 0.5 - datetime(1900, 1, 1).toordinal()) / 36525.0
     t_hour = (dnum % 1) * 24
@@ -341,13 +351,6 @@ def _vphase(dnum, constituents):
     Vp = np.mod(360 * (0.928693 + 11.302872 * t - 0.000029 * t * t), 360)
     VN = np.mod(360 * (0.719954 - 5.372617 * t + 0.000006 * t * t), 360)
     Vp1 = np.mod(360 * (0.781169 + 0.004775 * t + 0.000001 * t * t), 360)
-
-    # Fix negative values (MATLAB equivalent)
-    Vs = np.mod(Vs, 360)
-    Vh = np.mod(Vh, 360)
-    Vp = np.mod(Vp, 360)
-    VN = np.mod(VN, 360)
-    Vp1 = np.mod(Vp1, 360)
 
     result = []
     for con in constituents:
@@ -360,13 +363,13 @@ def _vphase(dnum, constituents):
 
 
 # ---------------------------------------------------------------------------
-# ap2ep (matching MATLAB ap2ep exactly)
+# ap2ep（匹配 MATLAB ap2ep）
 # ---------------------------------------------------------------------------
 
 def _ap2ep(Au, PHIu, Av, PHIv):
     """
-    Convert amplitude/phase to ellipse parameters.
-    Matches MATLAB ap2ep from TPXO2ROMS_v4pt0.
+    将振幅/相位转换为椭圆参数。
+    匹配 MATLAB ap2ep（Zhigang Xu 原版）。
     """
     PHIu_r = np.deg2rad(PHIu)
     PHIv_r = np.deg2rad(PHIv)
@@ -395,37 +398,37 @@ def _ap2ep(Au, PHIu, Av, PHIv):
 
 
 # ---------------------------------------------------------------------------
-# NetCDF output (matching MATLAB TPXO2ROMS_v4pt0 output exactly)
+# NetCDF 输出（NETCDF3_CLASSIC 格式，兼容 ROMS 老版本）
 # ---------------------------------------------------------------------------
 
 def _write_tide_nc(fn, L, M, N, constituents, periods,
                    zamp, zpha, cmax, cmin, cangle, cphase,
                    uamp, upha, vamp, vpha, ini_date):
     """
-    Write ROMS tide forcing file matching MATLAB output structure.
-    Dimension order: (xi_rho, eta_rho, tide_period) — same as MATLAB nccreate.
+    写入 ROMS 潮汐强迫文件。
+    维度顺序: (xi_rho, eta_rho, tide_period) — 与 MATLAB 一致。
+    使用 NETCDF3_CLASSIC 格式确保 ROMS 老版本可读取。
     """
-    ds = nc.Dataset(fn, 'w', format='NETCDF3_64BIT')
+    ds = nc.Dataset(fn, 'w', format='NETCDF3_CLASSIC')
 
-    # Global attributes
+    # 全局属性
     ROMStitle = f'ROMS TPXO data for {ini_date.strftime("%b %d %Y")}'
     ds.title = ROMStitle
     ds.Creation_date = ini_date.strftime('%Y%m%d')
-    ds.grd_file = fn  # MATLAB saves the grid filename but we don't have it here
+    ds.grd_file = fn
     ds.type = 'ROMS forcing file from TPXO'
-    # MATLAB datenum equivalent
-    dnum = ini_date.toordinal() + (ini_date.hour + ini_date.minute/60 + ini_date.second/3600) / 24.0
+    dnum = _datetime_to_datenum(ini_date)
     ds.ini_date_datenumber = dnum
     ds.ini_date_mjd = dnum - datetime(1968, 5, 23).toordinal()
     components_str = ' '.join([f'{c} ' for c in constituents])
     ds.components = components_str
 
-    # Dimensions
+    # 维度
     ds.createDimension('tide_period', N)
     ds.createDimension('eta_rho', L)
     ds.createDimension('xi_rho', M)
 
-    # zero_phase_date scalar (ROMS convention for phase reference)
+    # zero_phase_date（ROMS 惯例）
     zpd = float(ini_date.strftime('%Y%m%d.%f'))
     zv = ds.createVariable('zero_phase_date', 'f8', ())
     zv.long_name = 'tidal reference date for zero phase'
@@ -440,9 +443,9 @@ def _write_tide_nc(fn, L, M, N, constituents, periods,
     v.units = 'hours'
     v[:] = periods
 
-    # All tide fields: MATLAB writes as (xi_rho, eta_rho, tide_period)
-    # Our data arrays are (L, M, N) = (eta_rho, xi_rho, tide_period)
-    # Need to transpose: data.transpose(1, 0, 2) → (xi_rho, eta_rho, tide_period)
+    # 所有潮汐场: MATLAB 写入 (xi_rho, eta_rho, tide_period)
+    # 我们的数据是 (L, M, N) = (eta_rho, xi_rho, tide_period)
+    # 需要转置: data.transpose(1, 0, 2) -> (xi_rho, eta_rho, tide_period)
     def _reorder(arr):
         return np.ascontiguousarray(arr.transpose(1, 0, 2))
 
@@ -468,11 +471,11 @@ def _write_tide_nc(fn, L, M, N, constituents, periods,
                'Tidal current phase angle', 'degrees')
 
     _write_vec('tide_Uamp', uamp,
-               'Tidal current U-component amplitude', 'meters')
+               'Tidal current U-component amplitude', 'meter second-1')
     _write_vec('tide_Uphase', upha,
                'Tidal current U-component phase', 'degrees')
     _write_vec('tide_Vamp', vamp,
-               'Tidal current V-component amplitude', 'meters')
+               'Tidal current V-component amplitude', 'meter second-1')
     _write_vec('tide_Vphase', vpha,
                'Tidal current V-component phase', 'degrees')
 

@@ -32,3 +32,8 @@ opencode.json
 # Third-party / external
 pyroms-python3/
 .omo/
+.codegraph/
+
+# Local reference implementations (superseded by roms_prepro/ package)
+/d_cmems2roms_py.py
+/roms_tools.py
