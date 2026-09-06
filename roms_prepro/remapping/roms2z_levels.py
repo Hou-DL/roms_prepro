@@ -42,12 +42,12 @@ except ImportError:
     from grid.vgrid import set_depth, stretching
 
 
-# Default standard depth levels (positive, meters)
+# Default standard depth levels (positive, meters) — 30 levels,
+# surface-refined: every 10 m to 30 m, then widening spacing with depth
 DEFAULT_STD_DEPTHS = [
-    0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
-    125, 150, 175, 200, 225, 250, 275, 300, 325, 350, 375, 400, 450, 500, 550, 600, 650,
-    700, 750, 800, 900, 1000, 1250, 1500, 2000, 2250, 2500, 2750, 3000, 3500, 4000, 4500,
-    5000, 5500,
+    0, 10, 20, 30, 50, 75, 100, 125, 150, 200, 250, 300,
+    400, 500, 600, 700, 800, 900, 1000, 1250, 1500, 1750, 2000,
+    2500, 3000, 3500, 4000, 4500, 5000, 5500,
 ]
 
 
@@ -208,8 +208,9 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
         Output file path. If None, adds suffix to input filename.
     std_depths : array-like, optional
         Target depth levels, positive meters downward (sign is normalized).
-        Uses DEFAULT_STD_DEPTHS if None.  Levels deeper than the maximum
-        bathymetry are dropped automatically.
+        Uses DEFAULT_STD_DEPTHS (30 levels) if None.  Levels deeper than
+        the maximum bathymetry are dropped automatically.  The output
+        vertical coordinate is named ``depth`` (positive down).
     suffix : str
         Output filename suffix when output_file is not specified.
     variables : list of str, optional
@@ -335,7 +336,7 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
         ds_out = nc4.Dataset(output_file, 'w')
 
         # Dimensions
-        ds_out.createDimension('z', len(std_depths_filtered))
+        ds_out.createDimension('depth', len(std_depths_filtered))
         ds_out.createDimension('eta_rho', eta_rho)
         ds_out.createDimension('xi_rho', xi_rho)
         if need_u:
@@ -347,7 +348,7 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
         ds_out.createDimension('ocean_time', None)
 
         # Coordinate variables
-        v = ds_out.createVariable('z', 'f8', ('z',))
+        v = ds_out.createVariable('depth', 'f8', ('depth',))
         v[:] = std_depths_filtered
         v.long_name = 'depth'
         v.units = 'meter'
@@ -415,11 +416,11 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
                     z_var[t] = _compute_depths(igrid, h, zeta[t])
 
                 if igrid == 1 or igrid == 5 or to_rho:
-                    dims_out = ('ocean_time', 'z', 'eta_rho', 'xi_rho')
+                    dims_out = ('ocean_time', 'depth', 'eta_rho', 'xi_rho')
                 elif igrid == 3:
-                    dims_out = ('ocean_time', 'z', 'eta_u', 'xi_u')
+                    dims_out = ('ocean_time', 'depth', 'eta_u', 'xi_u')
                 else:
-                    dims_out = ('ocean_time', 'z', 'eta_v', 'xi_v')
+                    dims_out = ('ocean_time', 'depth', 'eta_v', 'xi_v')
 
                 # Interpolated data
                 var_out = roms_to_z_levels(var_data, z_var, std_depths_filtered, water)
