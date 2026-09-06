@@ -40,6 +40,9 @@ def station_to_z_levels(var_sigma, sigma_depth, z_levels, spval=1e37):
     sigma_depth = np.asarray(sigma_depth, dtype=float)
 
     assert var_sigma.ndim == 2, 'var_sigma must be 2-D (N_sigma, N_sta)'
+    # tolerate extra singleton dimensions (e.g. set_depth on 1-D h -> (N,1,nsta))
+    var_sigma = var_sigma.reshape(var_sigma.shape[0], -1)
+    sigma_depth = sigma_depth.reshape(sigma_depth.shape[0], -1)
     N_sigma, N_sta = var_sigma.shape
 
     # Reshape to 3-D (ns, eta=1, xi=sta) to reuse sigma_to_z

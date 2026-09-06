@@ -452,4 +452,7 @@ boundaries = (False, True, True, True)  # 无西边界
 
 ## 示例脚本
 
-参考 `examples/` 目录中的示例脚本。
+- `roms_prepro/all_examples.py` — 全部模块用法的总示例索引
+  （`python roms_prepro/all_examples.py` 列出全部示例，带名称运行指定示例；
+  其中 `vgrid` / `grid_metrics` / `remap_station` / `remap_array` 可直接运行演示）
+- `examples/` 目录 — 各功能可运行的配置模板

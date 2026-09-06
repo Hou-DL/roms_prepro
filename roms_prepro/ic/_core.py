@@ -957,16 +957,16 @@ def sigma_to_z(var_sigma, sigma_depth, z_levels, fill_value=np.nan):
 
     for j in range(eta):
         for i in range(xi):
-            s_dep = sigma_depth[:, j, i]
-            v_col = var_sigma[:, j, i]
+            s_dep = np.atleast_1d(np.ravel(sigma_depth[:, j, i]))
+            v_col = np.atleast_1d(np.ravel(var_sigma[:, j, i]))
             valid = np.isfinite(v_col)
             if valid.sum() < 2:
                 continue
             z_s = s_dep[valid]
             v_s = v_col[valid]
-            if z_s[0] > z_s[-1]:
-                z_s = z_s[::-1]
-                v_s = v_s[::-1]
+            order = np.argsort(z_s)          # np.interp needs ascending xp
+            z_s = z_s[order]
+            v_s = v_s[order]
             result[:, j, i] = np.interp(z_levels, z_s, v_s,
                                          left=fill_value, right=fill_value)
     return result

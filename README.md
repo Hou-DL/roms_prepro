@@ -99,6 +99,8 @@ from roms_prepro.remapping import sigma_to_z_levels, process_file
 ```
 
 `main.py` 提供全部步骤的参数模板（`python main.py grid|ic_cmems|bry_cmems|...`）；
+`roms_prepro/all_examples.py` 是覆盖全部模块用法的总示例索引
+（`python roms_prepro/all_examples.py` 列出，带参数运行指定示例）；
 可运行的配置模板见 `examples/` 目录。
 
 ---
