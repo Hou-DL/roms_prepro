@@ -299,15 +299,17 @@ def _interpolate(data_3d, lon_in, lat_in, lon_rho, lat_rho):
         data_3d = data_3d[:, :, order]
 
     target = np.column_stack([lat_rho.ravel(), lon_rho.ravel()])
-    interp = RegularGridInterpolator(
-        (lat_in, lon_in), np.zeros((len(lat_in), len(lon_in))),
-        method='linear', bounds_error=False, fill_value=np.nan)
 
     ntime = data_3d.shape[0]
     Lp, Mp = lon_rho.shape
     result = np.zeros((ntime, Lp, Mp))
     for t in range(ntime):
-        interp.values = data_3d[t]
+        # build per time step: RegularGridInterpolator.values became a
+        # read-only property in scipy >= 1.14, so swapping interp.values
+        # in place no longer works
+        interp = RegularGridInterpolator(
+            (lat_in, lon_in), data_3d[t],
+            method='linear', bounds_error=False, fill_value=np.nan)
         result[t] = interp(target).reshape(Lp, Mp)
     return result
 

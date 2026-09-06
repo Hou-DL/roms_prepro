@@ -161,6 +161,9 @@ def interp_to_roms(data, lon_1d, lat_1d, lon_rho, lat_rho):
 
 def mercator2roms_2d(Zeta, lon_1d, lat_1d, lon_rho, lat_rho):
     """2D interpolation (zeta) with de-mean, fill, re-mean."""
+    # plain ndarray with NaN at invalid points: masked arrays propagate
+    # their underlying fill values into the interpolator and are slow
+    Zeta = np.ma.filled(np.asarray(Zeta, dtype=float), np.nan)
     zeta_mean = np.nanmean(Zeta)
     Zeta_dm = Zeta - zeta_mean
     Fout = interp_to_roms(Zeta_dm, lon_1d, lat_1d, lon_rho, lat_rho)
@@ -177,6 +180,7 @@ def mercator2roms_3d(Finp, lon_1d, lat_1d, depth_in, lon_rho, lat_rho, z_r):
     depth_in: (ndepth_src,) negative values (downward negative)
     z_r: (nlat_roms, nlon_roms, N) ROMS sigma depths
     """
+    Finp = np.ma.filled(np.asarray(Finp, dtype=float), np.nan)
     nlat_r, nlon_r, N = z_r.shape
     ndepth_src = len(depth_in)
 

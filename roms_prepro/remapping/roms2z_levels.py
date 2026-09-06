@@ -117,6 +117,10 @@ def roms_to_z_levels(var_data, z_sigma, std_depths, valid_mask):
     std_z = -np.array(std_depths, dtype=float)
     nz = len(std_depths)
 
+    # Plain ndarrays: per-column slicing of masked arrays is ~25x slower
+    var_data = np.ma.filled(np.asarray(var_data, dtype=float), np.nan)
+    z_sigma = np.ma.filled(np.asarray(z_sigma, dtype=float), np.nan)
+
     # Determine input dimensions
     has_time = var_data.ndim == 4
     if has_time:
@@ -266,8 +270,9 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
             N = int(overrides.get('N', N))
             print(f"    vgrid overrides: {overrides}")
 
-        # Read bathymetry and SSH
-        h = ds.variables['h'][:]
+        # Read bathymetry and SSH (plain ndarrays — masked arithmetic
+        # and per-column slicing are much slower)
+        h = np.ma.filled(np.asarray(ds.variables['h'][:], dtype=float), np.nan)
         eta_rho, xi_rho = h.shape
 
         # Time
@@ -291,7 +296,7 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
 
         # Land mask
         if 'mask_rho' in ds.variables:
-            mask_rho = ds.variables['mask_rho'][:]
+            mask_rho = np.ma.filled(np.asarray(ds.variables['mask_rho'][:]), 0)
         else:
             mask_rho = np.ones((eta_rho, xi_rho))
 
@@ -299,7 +304,7 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
 
         # Read zeta for all times
         if 'zeta' in ds.variables:
-            zeta = ds.variables['zeta'][:]
+            zeta = np.ma.filled(np.asarray(ds.variables['zeta'][:], dtype=float), np.nan)
             if zeta.ndim == 2:
                 zeta = zeta[np.newaxis, :]
         else:
@@ -467,8 +472,11 @@ def _interp_to_z_1d(val_profile, z_profile, std_z):
     """
     Interpolate a single vertical profile to standard z-levels.
 
-    Returns the interpolated values at std_z (negative depths).
-    NaN for out-of-range points.
+    Returns the interpolated values at std_z (negative depths):
+    NaN for targets deeper than the deepest sigma level, and the top
+    sigma value for targets shallower than the shallowest level.
+    np.interp is used directly — constructing a scipy interp1d object
+    per column dominated the runtime (~15x slower).
     """
     valid = np.isfinite(val_profile) & np.isfinite(z_profile)
     if valid.sum() < 2:
@@ -477,17 +485,13 @@ def _interp_to_z_1d(val_profile, z_profile, std_z):
     z_sorted = z_profile[valid]
     v_sorted = val_profile[valid]
 
-    # Sort by depth (most negative first = deepest)
+    # np.interp needs ascending xp (most negative first = deepest)
     order = np.argsort(z_sorted)
     z_sorted = z_sorted[order]
     v_sorted = v_sorted[order]
 
-    from scipy.interpolate import interp1d
-    # z_sorted: deepest(-) → shallowest(+); v_sorted: deepest → shallowest
-    # Use top sigma level value for depths shallower than it (surface gap)
-    f = interp1d(z_sorted, v_sorted, bounds_error=False,
-                 fill_value=(np.nan, v_sorted[-1]))
-    return f(std_z)
+    return np.interp(std_z, z_sorted, v_sorted,
+                     left=np.nan, right=v_sorted[-1])
 
 
 def main():
