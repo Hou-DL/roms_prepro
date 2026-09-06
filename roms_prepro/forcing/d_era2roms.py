@@ -1,4 +1,7 @@
-from era5_to_roms import ERA5toROMS
+try:
+    from roms_prepro.forcing.era5_to_roms import ERA5toROMS
+except ImportError:  # direct-script mode
+    from era5_to_roms import ERA5toROMS
 
 # # 方式1：处理全部数据（自动检测时间范围和基准日期）
 converter1 = ERA5toROMS(
