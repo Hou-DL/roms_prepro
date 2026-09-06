@@ -8,8 +8,8 @@ Standard depth levels (default):
     0, 5, 10, 15, ..., 100, 125, 150, ..., 500, 550, ..., 5000, 5500 m
 
 Usage (Python):
-    from roms_prepro.remapping import roms_to_std_levels
-    roms_to_std_levels('ocean_avg_0003.nc', 'output.nc')
+    from roms_prepro.remapping import process_file
+    process_file('ocean_avg_0003.nc', 'output.nc')
 
 Usage (CLI):
     python -m roms_prepro.remapping.roms2z_levels -i ocean_avg_0003.nc -o output.nc
@@ -17,6 +17,7 @@ Usage (CLI):
 """
 
 import argparse
+import glob
 import os
 import sys
 import time

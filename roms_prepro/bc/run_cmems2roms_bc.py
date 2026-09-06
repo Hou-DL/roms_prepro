@@ -23,7 +23,7 @@ Verified: 2025-07-06 (NSCS domain, CMEMS 2024)
 """
 
 import os, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import roms_prepro.bc.d_obc_cmems as cfg
 from roms_prepro.bc.d_obc_cmems import main as cmems_bry_main

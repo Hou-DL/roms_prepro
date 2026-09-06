@@ -37,7 +37,6 @@ CMEMS 数据支持以下几种组织方式：
   - 时间: time, time_counter
 """
 import sys, time, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
 import xarray as xr
@@ -45,7 +44,12 @@ import netCDF4 as nc
 from scipy.interpolate import griddata, interp1d, RegularGridInterpolator
 from scipy.ndimage import distance_transform_edt
 from datetime import datetime
-from roms_tools import stretching, set_depth, roms_vectors, uv_barotropic
+
+try:
+    from .roms_tools import stretching, set_depth
+except ImportError:  # direct-script mode: fall back to this directory
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from roms_tools import stretching, set_depth
 
 # ============================================================
 #  配置参数 - 修改以下参数

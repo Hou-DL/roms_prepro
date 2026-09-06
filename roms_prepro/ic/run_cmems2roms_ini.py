@@ -23,7 +23,7 @@ Verified: 2025-07-06 (NSCS domain, CMEMS 2025-05)
 """
 
 import os, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from roms_prepro.ic import cmems_to_roms_ini
 
