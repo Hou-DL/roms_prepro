@@ -330,12 +330,16 @@ var_z = sigma_to_z_levels(
 )
 ```
 
-整文件一键转换（垂直参数自动从文件读取，可覆盖；深度自动过滤超过最大水深的层）：
+整文件一键转换（垂直参数自动从文件读取，可覆盖；深度自动过滤超过最大水深的层；
+默认变量 temp/salt/u/v/zeta，其中 zeta 表层场直接拷贝）：
 
 ```python
 from roms_prepro.remapping import process_file
 
 process_file('ocean_his_0001.nc', 'ocean_his_0001_z.nc')   # 全部默认
+#   默认 to_rho=True: u/v 平均到 rho 网格, 输出单一水平网格 (lon/lat),
+#   不含交错维度, 文件精简易读
+process_file('ocean_his_0001.nc', 'out_z.nc', to_rho=False)  # 保留原网格
 
 process_file(                          # 指定变量 / 深度 / 垂直参数
     'ocean_his_0001.nc', 'out_z.nc',

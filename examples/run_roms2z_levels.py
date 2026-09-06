@@ -90,6 +90,10 @@ VARIABLES = None
 # 只需给出要覆盖的键，如 {'N': 32, 'theta_s': 5.0}
 VGRID_PARAMS = None
 
+# 水平网格: True = 全部变量换到 rho 网格（默认，输出更精简，坐标为 lon/lat）
+#           False = 保留原交错网格（u 在 eta_u/xi_u，坐标为 lon_rho/lon_u/...）
+TO_RHO = True
+
 # 垂直参数 (自动从输入文件读取)
 # Vtransform, Vstretching, theta_s, theta_b, N are auto-detected from input file
 
@@ -122,6 +126,7 @@ if __name__ == '__main__':
         suffix=SUFFIX,
         variables=VARIABLES,
         vgrid_params=VGRID_PARAMS,
+        to_rho=TO_RHO,
     )
 
     if result:

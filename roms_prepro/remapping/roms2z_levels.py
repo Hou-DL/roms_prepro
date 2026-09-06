@@ -12,6 +12,9 @@ copied as a 2-D surface field, vertical parameters auto-detected:
     from roms_prepro.remapping import process_file
     process_file('ocean_avg_0003.nc', 'output.nc')
 
+Keep native staggered grids instead of the default all-RHO output:
+    process_file('ocean_avg_0003.nc', 'output_z.nc', to_rho=False)
+
 One-click with explicit variables, depths and vertical overrides:
     process_file('ocean_avg_0003.nc', 'output_z.nc',
                  variables=['temp', 'salt'],
@@ -155,8 +158,40 @@ def roms_to_z_levels(var_data, z_sigma, std_depths, valid_mask):
     return var_out
 
 
+def _staggered_to_rho(var_data, axis, fill):
+    """
+    Reconstruct a u/v-point field on the RHO grid.
+
+    Interior RHO points (n+1 of them for n staggered points) get the mean
+    of their two flanking staggered values; if only one neighbour is valid
+    (coast) that value is used, otherwise ``fill``.  The two outer RHO
+    points are extrapolated from the nearest staggered value.  ``axis`` is
+    the staggered axis (-1 for u/xi, -2 for v/eta).
+    """
+    n = var_data.shape[axis]
+
+    def _take(idx):
+        return np.ma.filled(np.take(var_data, idx, axis=axis), np.nan)
+
+    a = _take(range(n - 1))     # staggered point left of each interior rho point
+    b = _take(range(1, n))      # staggered point right of it
+    av = np.abs(a) < 1e30
+    bv = np.abs(b) < 1e30
+    mid = np.full(a.shape, fill, dtype=float)
+    both = av & bv
+    mid[both] = 0.5 * (a + b)[both]
+    mid[av & ~bv] = a[av & ~bv]
+    mid[~av & bv] = b[~av & bv]
+
+    def _edge(idx):
+        e = _take(idx)
+        return np.expand_dims(np.where(np.abs(e) < 1e30, e, fill), axis=axis)
+
+    return np.concatenate([_edge(0), mid, _edge(n - 1)], axis=axis)
+
+
 def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
-                 variables=None, vgrid_params=None):
+                 variables=None, vgrid_params=None, to_rho=True):
     """
     One-click conversion of a ROMS file from sigma to standard z-levels.
 
@@ -187,6 +222,14 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
         {'Vtransform': 2, 'Vstretching': 4, 'theta_s': 7.0, 'theta_b': 0.1,
          'Tcline': 20.0, 'N': 30}.  Keys set to None (or absent) keep the
         values auto-detected from the input file.
+    to_rho : bool, optional
+        True (default): put EVERYTHING on the RHO grid — u/v are averaged
+        onto RHO points, the file carries a single horizontal grid with
+        coordinates named ``lon``/``lat``, and no staggered dimensions are
+        created (compact, easy to read).
+        False: keep each variable on its native staggered grid
+        (u on eta_u/xi_u, v on eta_v/xi_v) with lon_rho/lon_u/lon_v
+        coordinate names.
 
     Returns
     -------
@@ -283,9 +326,10 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
             return None
 
         # Staggered dimensions are created only when a requested variable
-        # actually lives on them, so rho-only selections stay lean
-        need_u = any('xi_u' in ds.variables[v_].dimensions for v_ in var_list)
-        need_v = any('eta_v' in ds.variables[v_].dimensions for v_ in var_list)
+        # stays on its native grid (to_rho=False); in the default to_rho
+        # mode everything lives on the single RHO grid
+        need_u = (not to_rho) and any('xi_u' in ds.variables[v_].dimensions for v_ in var_list)
+        need_v = (not to_rho) and any('eta_v' in ds.variables[v_].dimensions for v_ in var_list)
 
         # Create output dataset
         ds_out = nc4.Dataset(output_file, 'w')
@@ -314,17 +358,23 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
         v.units = time_units
         v.long_name = 'time since initialization'
 
-        # Copy lon/lat for the grids that are actually written
-        coord_vars = ['lon_rho', 'lat_rho']
-        if need_u:
-            coord_vars += ['lon_u', 'lat_u']
-        if need_v:
-            coord_vars += ['lon_v', 'lat_v']
-        for vname in coord_vars:
-            if vname in ds.variables:
-                src_v = ds.variables[vname]
+        # Horizontal coordinates: to_rho mode writes a single lon/lat pair;
+        # native mode copies lon_rho/lon_u/lon_v under their ROMS names
+        if to_rho:
+            coord_names = [('lon_rho', 'lon'), ('lat_rho', 'lat')]
+        else:
+            coord_names = [('lon_rho', 'lon_rho'), ('lat_rho', 'lat_rho')]
+            if need_u:
+                coord_names += [('lon_u', 'lon_u'), ('lat_u', 'lat_u')]
+            if need_v:
+                coord_names += [('lon_v', 'lon_v'), ('lat_v', 'lat_v')]
+        for src_name, out_name in coord_names:
+            if src_name in ds.variables:
+                src_v = ds.variables[src_name]
                 dims = src_v.dimensions
-                v_out = ds_out.createVariable(vname, 'f8', dims)
+                if to_rho:
+                    dims = ('eta_rho', 'xi_rho')
+                v_out = ds_out.createVariable(out_name, 'f8', dims)
                 v_out[:] = src_v[:]
                 for attr in src_v.ncattrs():
                     setattr(v_out, attr, getattr(src_v, attr))
@@ -332,15 +382,26 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
         for var_name in var_list:
             src_v = ds.variables[var_name]
             var_data = src_v[:]
+            fill_val = getattr(src_v, '_FillValue', np.nan)
 
             # Determine grid position from dimensions
             dims = src_v.dimensions
             has_vertical = ('s_rho' in dims) or ('s_w' in dims)
+            on_u = 'xi_u' in dims
+            on_v = 'eta_v' in dims
+
+            # to_rho mode: move u/v fields onto the RHO grid first
+            # (average of the two flanking staggered values, coastal
+            #  one-sided neighbours taken as-is, fill kept as fill)
+            if to_rho and (on_u or on_v):
+                axis = -1 if on_u else -2
+                var_data = _staggered_to_rho(var_data, axis, fill_val)
+                on_u = on_v = False
 
             if has_vertical:
-                if 'xi_u' in dims:
+                if on_u:
                     igrid = 3  # u-points
-                elif 'eta_v' in dims:
+                elif on_v:
                     igrid = 4  # v-points
                 elif 's_w' in dims:
                     igrid = 5  # w-points
@@ -353,14 +414,12 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
                 for t in range(ntime):
                     z_var[t] = _compute_depths(igrid, h, zeta[t])
 
-                if igrid == 1:
+                if igrid == 1 or igrid == 5 or to_rho:
                     dims_out = ('ocean_time', 'z', 'eta_rho', 'xi_rho')
                 elif igrid == 3:
                     dims_out = ('ocean_time', 'z', 'eta_u', 'xi_u')
-                elif igrid == 4:
-                    dims_out = ('ocean_time', 'z', 'eta_v', 'xi_v')
                 else:
-                    dims_out = ('ocean_time', 'z', 'eta_rho', 'xi_rho')
+                    dims_out = ('ocean_time', 'z', 'eta_v', 'xi_v')
 
                 # Interpolated data
                 var_out = roms_to_z_levels(var_data, z_var, std_depths_filtered, water)
@@ -371,9 +430,12 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
             else:
                 # 2-D surface field (e.g. zeta): copy without vertical interpolation
                 var_out = var_data
-                dims_out = dims
+                if to_rho:
+                    dims_out = ('ocean_time', 'eta_rho', 'xi_rho') if 'ocean_time' in dims \
+                        else ('eta_rho', 'xi_rho')
+                else:
+                    dims_out = dims
 
-            fill_val = getattr(src_v, '_FillValue', np.nan)
             v_out = ds_out.createVariable(var_name, 'f8', dims_out, fill_value=fill_val)
             v_out[:] = var_out
             for attr in src_v.ncattrs():
@@ -446,6 +508,9 @@ def main():
     parser.add_argument('--vars', nargs='+',
                         help='Variables to process (default: temp salt u v zeta; '
                              'zeta is copied as a 2-D field)')
+    parser.add_argument('--native-grid', action='store_true',
+                        help='Keep variables on their native staggered grids '
+                             '(default: everything on the RHO grid, coords lon/lat)')
     parser.add_argument('-j', '--workers', type=int, default=1,
                         help='Number of parallel workers (default: 1)')
 
@@ -472,17 +537,19 @@ def main():
     print(f"  Files: {len(input_files)}")
     print(f"  Depth levels: {len(std_depths)} ({std_depths[0]}-{std_depths[-1]}m)")
 
+    to_rho = not args.native_grid
     if args.output and len(input_files) == 1:
-        process_file(input_files[0], args.output, std_depths, variables=args.vars)
+        process_file(input_files[0], args.output, std_depths,
+                     variables=args.vars, to_rho=to_rho)
     elif len(input_files) == 1:
         process_file(input_files[0], std_depths=std_depths, suffix=args.suffix,
-                     variables=args.vars)
+                     variables=args.vars, to_rho=to_rho)
     else:
         os.makedirs(args.output_dir, exist_ok=True)
         for f in input_files:
             base = os.path.splitext(os.path.basename(f))[0]
             out = os.path.join(args.output_dir, f"{base}{args.suffix}.nc")
-            process_file(f, out, std_depths, variables=args.vars)
+            process_file(f, out, std_depths, variables=args.vars, to_rho=to_rho)
         print(f"\nDone! {len(input_files)} files processed.")
 
     return 0

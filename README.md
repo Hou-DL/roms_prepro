@@ -87,7 +87,9 @@ from roms_prepro.remapping import sigma_to_z_levels, process_file
 # import numpy as np
 # zlevs = np.arange(-5, -500, -5)
 # var_z = sigma_to_z_levels(var_sigma, 'my_grid.nc', zlevs, N=30)
-# process_file('ocean_his_0001.nc', 'ocean_his_0001_z.nc')      # 整文件一键转换
+# process_file('ocean_his_0001.nc', 'ocean_his_0001_z.nc')   # 一键: temp/salt/u/v/zeta
+#   默认全部变量换到 rho 网格, 坐标为 lon/lat, 文件精简易读
+# process_file('in.nc', 'out_z.nc', to_rho=False)              # 保留原交错网格
 # process_file('in.nc', 'out_z.nc', variables=['temp', 'salt'],  # 指定变量+深度
 #              std_depths=[0, 10, 50, 100, 500, 1000],
 #              vgrid_params=None)          # None=自动读取; 可覆盖 N/theta_s 等
