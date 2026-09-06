@@ -4,19 +4,6 @@
 
 **Demo 版本** — 适用于 [ROMS](https://www.myroms.org/) (Regional Ocean Modeling System) 的前处理工具包，覆盖网格生成、初始场/边界场、大气强迫、潮汐强迫、河流输入、sigma↔z 坐标转换的全流程数据准备。
 
-<<<<<<< HEAD
-| 模块 | 功能 |
-|------|------|
-| `roms_prepro/grid/` | ROMS 网格生成与质量控制 |
-| `roms_prepro/icbc/` | 初始场 (IC) 和边界场 (BC) — 支持 ROMS/Mercator/HYCOM 数据源 |
-| `roms_prepro/forcing/` | ERA5 大气强迫场 (风、气压、辐射、降水、湿度) |
-| `roms_prepro/tide/` | 潮汐强迫 (TPXO8) |
-| `roms_prepro/river/` | 河流输入 (月均流量) |
-| `roms_prepro/utils/` | 工具函数 |
-=======
----
->>>>>>> 34158e6 (Add sta2z, bilingual README, update main.py)
-
 <!-- English -->
 
 **Demo version** — A preprocessing toolkit for [ROMS](https://www.myroms.org/) (Regional Ocean Modeling System). Supports the full workflow: grid generation, initial/boundary conditions, atmospheric forcing, tidal forcing, river input, and sigma↔z coordinate remapping.
@@ -28,12 +15,12 @@
 | Module | 中文功能 | Description |
 |--------|----------|-------------|
 | `grid/` | ROMS 网格生成与质量控制 | Grid generation and quality control |
-| `icbc/` | 初始场 (IC) 和边界场 (BC) — CMEMS/Mercator/HYCOM | Initial and boundary conditions from CMEMS/Mercator/HYCOM |
+| `ic/` | 初始场 (IC) — CMEMS/Mercator/HYCOM 或 ROMS→ROMS | Initial conditions from CMEMS/Mercator/HYCOM or another ROMS run |
+| `bc/` | 边界场 (BC) — CMEMS→ROMS 或 ROMS→ROMS | Boundary conditions from CMEMS or another ROMS run |
 | `forcing/` | ERA5 大气强迫 (风、气压、辐射、降水、湿度) | ERA5 atmospheric forcing (wind, pressure, radiation, precipitation, humidity) |
 | `tide/` | TPXO8 潮汐强迫 (8 主要分潮) | TPXO8 tidal forcing (8 major constituents) |
 | `river/` | 河流输入 (月均流量) | River forcing (monthly climatology) |
 | `remapping/` | sigma↔z 坐标插值 (网格场 + 站点) | Sigma↔z coordinate interpolation (gridded fields and station profiles) |
-| `utils/` | 工具函数 | Utility functions |
 
 ---
 
@@ -52,44 +39,59 @@ conda activate roms_prepro
 ```bash
 conda create -n roms_prepro python=3.10
 conda activate roms_prepro
-pip install numpy scipy netCDF4 tqdm
+pip install numpy scipy netCDF4 xarray tqdm
 ```
 
 ### 代码示例 / Code example
 
 ```python
 from roms_prepro.grid import create_roms_grid
-from roms_prepro.icbc import mercator_to_roms_ini, mercator_to_roms_bry
-from roms_prepro.forcing import era5_to_roms_forcing
+from roms_prepro.ic import cmems_to_roms_ini, mercator_to_roms_ini, roms_to_roms_ini
+from roms_prepro.forcing import ERA5toROMS
 from roms_prepro.tide import tpxo_to_roms_tide
 from roms_prepro.river import create_river_file
-from roms_prepro.remapping import sigma_to_z_levels, station_to_z_levels
+from roms_prepro.remapping import sigma_to_z_levels, process_file
 
 # 1. 网格 / Grid
-# create_roms_grid(bathy_file, 'my_grid.nc', ...)
+# create_roms_grid(lon_corners=[...], lat_corners=[...], nx=300, ny=200,
+#                  grid_file='my_grid.nc', source_lon=..., source_lat=...,
+#                  source_depth=..., min_depth=5.0, rx0max=0.2)
 
 # 2. 初始场 / Initial conditions
-# mercator_to_roms_ini('my_grid.nc', 'src.nc', 'ini.nc', N=30)
+# cmems_to_roms_ini('my_grid.nc', 'my_ini.nc', data_dir='/path/to/CMEMS/',
+#                   Vtransform=2, Vstretching=3, theta_s=2.5, theta_b=1.0,
+#                   Tcline=25.0, N=30, init_date='2025-05-01')
+# mercator_to_roms_ini('my_grid.nc', 'src.nc', 'ini.nc', N=30)   # 单文件源
+# roms_to_roms_ini(src_grid, src_hist, dst_grid, 'ini.nc')       # ROMS→ROMS
 
 # 3. 边界场 / Boundary conditions
-# mercator_to_roms_bry('my_grid.nc', ['src.nc'], 'bry.nc',
-#                      start_date='2025-01-01', end_date='2025-01-31', N=30)
+# import roms_prepro.bc.d_obc_cmems as cfg                      # CMEMS→ROMS
+# from roms_prepro.bc.d_obc_cmems import main as cmems_bry_main
+# cfg.DATA_DIR = '/path/to/CMEMS/'; cfg.GRD_NAME = 'my_grid.nc'
+# cfg.BRY_NAME = 'my_bry.nc'; cmems_bry_main()
+# from roms_prepro.bc import roms_to_roms_bry                   # ROMS→ROMS
 
 # 4. ERA5 大气强迫 / Atmospheric forcing
-# era5_to_roms_forcing('my_grid.nc', era5_files, 'forcing.nc',
-#                      start_date='2025-01-01', end_date='2025-01-31')
+# conv = ERA5toROMS(in_dir='/path/to/era5/', out_dir='./out',
+#                   base_date='1990-01-01 00:00:00')
+# conv.process()
 
 # 5. TPXO8 潮汐 / Tidal forcing (8 constituents)
-# tpxo_to_roms_tide('my_grid.nc', '/path/to/tpxo', 'tide.nc')
+# tpxo_to_roms_tide('my_grid.nc', 'tide.nc', t0='2000-01-01', ndays=365,
+#                   tpxo_dir='/path/to/tpxo')
 
 # 6. 河流 / River forcing
-# create_river_file('my_grid.nc', rivers, 'river.nc')
+# create_river_file('my_grid.nc', 'river.nc', rivers)
 
 # 7. sigma → z 坐标转换 / Coordinate remapping
 # import numpy as np
 # zlevs = np.arange(-5, -500, -5)
 # var_z = sigma_to_z_levels(var_sigma, 'my_grid.nc', zlevs, N=30)
+# process_file('ocean_his_0001.nc', 'ocean_his_0001_z.nc')      # 整文件转换 + CLI
 ```
+
+`main.py` 提供全部步骤的参数模板（`python main.py grid|ic_cmems|bry_cmems|...`）；
+可运行的配置模板见 `examples/` 目录。
 
 ---
 
@@ -102,25 +104,27 @@ from roms_prepro.remapping import sigma_to_z_levels, station_to_z_levels
 | netCDF4 | NetCDF 文件读写 | NetCDF I/O |
 | scipy | 插值 | Interpolation |
 | tqdm | 进度条 | Progress bars |
-| (可选) xarray, dask | ERA5 大数据处理 | Large ERA5 dataset handling |
+| xarray, cfgrib | ERA5 (GRIB/NC) 数据读取 | ERA5 dataset handling |
 
 ---
 
 ## 说明 / Notes
 
 ### 中文
-- **Demo 版本** — 功能完整，可用于实际 ROMS 模拟前处理
-- **ERA5 风场** — 使用原始 eastward/northward 分量，**不做角度旋转**
-- **TPXO 潮汐** — 默认 8 个标准分潮 (M2, S2, N2, K2, K1, O1, P1, Q1)，M4 可通过 `constituents` 参数手动添加
-- **河流输入** — 基于月气候态流量
-- **坐标转换** — `remapping` 模块支持网格场 (`sigma_to_z_levels`) 和站点数据 (`station_to_z_levels`)
+- 垂直坐标 stretching/set_depth 与 pyroms（ROMS set_scoord）数值一致，支持 Vstretching 1-4（Vstretching=5 为均匀 s 变体）
+- **ERA5 风场** — 默认不旋转到曲线网格坐标（`rotate_wind=True` 可开启）
+- **ERA5 累积量** — 辐射 (J/m²) 与降水 (m) 自动按数据步长换算为通量
+- **TPXO 潮汐** — 默认 8 个标准分潮 (M2, S2, N2, K2, K1, O1, P1, Q1)
+- **河流输入** — 基于月气候态流量，含 river_flag/Udirection/Vdirection 等 ROMS 必需变量
+- **坐标转换** — `remapping` 模块支持网格场 (`sigma_to_z_levels`)、整文件 (`process_file`) 和站点数据 (`station_to_z_levels`)
 
 ### English
-- **Demo version** — Fully functional for real ROMS preprocessing
-- **ERA5 wind** — Uses raw eastward/northward components, **no grid-angle rotation**
-- **TPXO tides** — Default 8 standard constituents (M2, S2, N2, K2, K1, O1, P1, Q1); M4 available via the `constituents` parameter
-- **River input** — Based on monthly climatological discharge
-- **Remapping** — `sigma_to_z_levels` for gridded fields, `station_to_z_levels` for station profiles
+- Vertical stretching/set_depth match pyroms (ROMS set_scoord); Vstretching 1-4 supported (Vstretching=5 uses a uniform-s variant)
+- **ERA5 wind** — no rotation to the curvilinear grid by default (`rotate_wind=True` to enable)
+- **ERA5 accumulations** — radiation (J/m²) and precipitation (m) auto-converted to fluxes using the data time step
+- **TPXO tides** — 8 standard constituents (M2, S2, N2, K2, K1, O1, P1, Q1)
+- **River input** — monthly climatological discharge with the ROMS-required river_flag/Udirection/Vdirection variables
+- **Remapping** — `sigma_to_z_levels` for gridded fields, `process_file` for whole files, `station_to_z_levels` for station profiles
 
 ---
 

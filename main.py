@@ -11,14 +11,17 @@ Usage
 -----
 ::
 
-    python main.py          # run all enabled steps
-    python main.py grid     # run only grid creation
-    python main.py ic       # run only IC creation
-    python main.py bc       # run only BC creation
-    python main.py forc     # run only ERA5 forcing
-    python main.py tide     # run only TPXO tidal forcing
-    python main.py river    # run only river forcing
-    python main.py remap    # run only sigma→z remapping
+    python main.py                    # run all enabled steps
+    python main.py grid               # run only grid creation
+    python main.py ic_mercator        # IC from a single Mercator file
+    python main.py ic_cmems           # IC from CMEMS variable files
+    python main.py bry_cmems          # BC from CMEMS files
+    python main.py ic_roms2roms       # IC via ROMS → ROMS remapping
+    python main.py bry_roms2roms      # BC via ROMS → ROMS remapping
+    python main.py forcing_era5       # ERA5 atmospheric forcing (ERA5toROMS)
+    python main.py tide               # TPXO8 tidal forcing
+    python main.py river              # river forcing
+    python main.py remap              # sigma→z remapping of a ROMS file
 
 Environment
 -----------
@@ -33,12 +36,11 @@ Module structure
     roms_prepro/
       grid/          — Grid creation (make_grid.py, bathymetry.py, vgrid.py, mask.py)
       ic/            — Initial conditions (cmems_ic.py, roms2roms_ic.py, _core.py)
-      bc/            — Boundary conditions (cmems_bc.py, roms2roms_bc.py, _core.py)
-      forcing/       — ERA5 atmospheric forcing (era5.py)
+      bc/            — Boundary conditions (d_obc_cmems.py, roms2roms_bc.py, _core.py)
+      forcing/       — ERA5 atmospheric forcing (era5_to_roms.py)
       tide/          — TPXO8 tidal forcing (make_tide.py)
       river/         — River forcing (make_river.py)
-      remapping/     — sigma↔z coordinate interpolation (roms2z.py, sta2z.py)
-      utils/         — Utility functions
+      remapping/     — sigma↔z coordinate interpolation (roms2z.py, sta2z.py, roms2z_levels.py)
 """
 
 import os, sys
@@ -336,85 +338,33 @@ def make_bry_roms2roms(dst_grid_file=None):
 
 def make_forcing_era5(grid_file=None):
     """
-    Create ROMS bulk-flux forcing file from ERA5 data.
+    Create ROMS bulk-flux forcing from ERA5 data (ERA5toROMS converter).
 
-    Supports ERA5 single-level variables:
-      u10, v10, t2m, msl, msdwlwrf, msnswrf, tp, d2m
-    Relative humidity can come from a separate RH_*.nc file or be
-    computed from d2m and t2m.
+    Supports ERA5 single-level variables (GRIB or NC):
+      u10, v10, t2m, d2m, msl, tp, msdrswrf/msdwswrf/ssrd, msdwlwrf/msnlwrf,
+      tcc, r
+    Accumulated fields (J/m2, m) are converted to fluxes automatically
+    using the data time step.
 
-    Two modes (set interp_to_grid=):
-      False (default) — keep ERA5 original 1D lat/lon grid, ROMS
-                        interpolates internally. Grid file NOT needed.
-      True            — bilinear interpolation to ROMS curvilinear grid.
-                        Requires grid_file with lon_rho/lat_rho.
+    Two modes (rotate_wind=):
+      False (default) — output u10/v10 components on the ERA5 (or ROMS) grid
+      True            — rotate winds to the ROMS curvilinear grid
+                        (requires grid_file with lon_rho/lat_rho/angle)
     """
-    from roms_prepro.forcing import era5_to_roms_forcing
-    from glob import glob
+    from roms_prepro.forcing import ERA5toROMS
 
     # ---------- edit these parameters ----------
-    interp_to_grid = False   # False = raw ERA5 grid, True = interpolate to ROMS
+    rotate_wind = False
 
-    if grid_file is None:
-        grid_file = 'my_grid.nc'
-
-    era5_dir = '/data/hdl/oceanfiles/era5/in/'
-    era5_files = sorted(glob(os.path.join(era5_dir, 'ERA5_*.nc')))
-    rh_files = sorted(glob(os.path.join(era5_dir, 'RH_*.nc')))
-
-    forc_file = 'my_forc_era5.nc'
-
-    start_date = '2024-12-27'
-    end_date = '2025-02-20 23:00:00'
-    time_ref = 'seconds since 2000-01-01 00:00:00'
-    # -------------------------------------------
-
-    if not era5_files:
-        print(f"WARNING: no ERA5 files found in {era5_dir}")
-        return
-    print(f"Found {len(era5_files)} ERA5 files")
-
-    era5_to_roms_forcing(
-        roms_grid_file=grid_file if interp_to_grid else None,
-        era5_files=era5_files,
-        rh_files=rh_files,
-        out_file=forc_file,
-        start_date=start_date, end_date=end_date, time_ref=time_ref,
-        get_lwrad=True,
-        get_swrad=True,
-        get_rain=True,
-        get_Tair=True,
-        get_Pair=True,
-        get_Qair=True,
-        get_Wind=True,
-        interp_to_grid=interp_to_grid,
-    )
-
-
-# ===========================================================================
-# 7.  ERA5 → ROMS Forcing (new version, GRIB+NC support)
-# ===========================================================================
-
-def make_forcing_era5_roms(grid_file=None):
-    """
-    ERA5 → ROMS Forcing using ERA5toROMS converter.
-
-    Supports GRIB and NC files, auto-detects time range,
-    splits wind and forcing into separate output files.
-    """
-    from roms_prepro.forcing.era5_to_roms import ERA5toROMS
-
-    # ---------- edit these parameters ----------
     era5_dir = '/data/hdl/oceanfiles/era5/in/'
     out_dir = './forcing_output'
 
-    # variables to process (see ERA5toROMS ROMS_VARINFO for full list)
-    variables = ['t2m', 'd2m', 'msl', 'tp', 'msdrswrf', 'msnlwrf', 'msdwlwrf', 'u10', 'v10']
+    variables = ['t2m', 'd2m', 'msl', 'tp',
+                 'msdrswrf', 'msdwlwrf', 'u10', 'v10']
 
-    time_start = None     # e.g. '2025-01-01 00:00:00'
-    time_end = None       # e.g. '2025-02-20 23:00:00'
-    base_date = '2025-01-01 00:00:00'
-    rotate_wind = False   # True = rotate to ROMS curvilinear grid
+    time_start = None            # e.g. '2025-01-01 00:00:00'
+    time_end = None              # e.g. '2025-02-20 23:00:00'
+    base_date = '1990-01-01 00:00:00'
     # -------------------------------------------
 
     converter = ERA5toROMS(
@@ -428,6 +378,80 @@ def make_forcing_era5_roms(grid_file=None):
         rotate_wind=rotate_wind,
     )
     converter.process()
+
+
+# ===========================================================================
+# 7.  TPXO8 tidal forcing
+# ===========================================================================
+
+def make_tide(grid_file=None):
+    """Create ROMS tidal forcing from TPXO8 atlas_30 data."""
+    from roms_prepro.tide import tpxo_to_roms_tide
+
+    # ---------- edit these parameters ----------
+    if grid_file is None:
+        grid_file = 'my_grid.nc'
+    tide_file = 'my_tide.nc'
+    tpxo_dir = '/path/to/tpxo8_atlas_30/'
+
+    t0 = '2000-01-01'          # phase reference time
+    ndays = 365                # simulation length (nodal factors at t0+ndays/2)
+    constituents = None        # None = 8 standard constituents
+    # -------------------------------------------
+
+    tpxo_to_roms_tide(roms_grid_file=grid_file, out_file=tide_file,
+                      t0=t0, ndays=ndays, tpxo_dir=tpxo_dir,
+                      constituents=constituents)
+
+
+# ===========================================================================
+# 8.  River forcing
+# ===========================================================================
+
+def make_river(grid_file=None):
+    """Create ROMS river forcing from monthly climatology."""
+    from roms_prepro.river import create_river_file, yangtze_river
+    import netCDF4 as nc4
+
+    # ---------- edit these parameters ----------
+    if grid_file is None:
+        grid_file = 'my_grid.nc'
+    river_file = 'my_river.nc'
+
+    g = nc4.Dataset(grid_file)
+    lon_rho = g.variables['lon_rho'][:]
+    lat_rho = g.variables['lat_rho'][:]
+    mask_rho = g.variables['mask_rho'][:]
+    g.close()
+
+    rivers = [
+        yangtze_river(lon_rho, lat_rho, mask_rho),
+        # huanghe_river(lon_rho, lat_rho, mask_rho),
+        # {'name': 'Custom River', 'I': 100, 'J': 50,
+        #  'discharge': 800.0, 'direction': 0},
+    ]
+    # -------------------------------------------
+
+    create_river_file(roms_grid_file=grid_file, out_file=river_file,
+                      rivers=rivers)
+
+
+# ===========================================================================
+# 9.  sigma → z-level remapping
+# ===========================================================================
+
+def make_remap(grid_file=None):
+    """Interpolate a ROMS output/IC file from sigma to standard z-levels."""
+    from roms_prepro.remapping import process_file
+
+    # ---------- edit these parameters ----------
+    input_file = 'ocean_his_0001.nc'
+    output_file = None                     # None = <input>_z.nc
+    std_depths = None                      # None = DEFAULT_STD_DEPTHS
+    # -------------------------------------------
+
+    process_file(input_file=input_file, output_file=output_file,
+                 std_depths=std_depths)
 
 
 # ===========================================================================
@@ -448,6 +472,9 @@ def main():
         # 'ic_roms2roms',      # 5. IC via ROMS → ROMS remapping
         # 'bry_roms2roms',     # 6. BC via ROMS → ROMS remapping
         # 'forcing_era5',      # 7. ERA5 atmospheric forcing
+        # 'tide',              # 8. TPXO8 tidal forcing
+        # 'river',             # 9. river forcing
+        # 'remap',             # 10. sigma → z remapping
     ]
     # -----------------------------------
 
@@ -482,13 +509,20 @@ def main():
         elif step == 'forcing_era5':
             make_forcing_era5(grid_file)
 
-        elif step == 'forcing_era5_roms':
-            make_forcing_era5_roms(grid_file)
+        elif step == 'tide':
+            make_tide(grid_file)
+
+        elif step == 'river':
+            make_river(grid_file)
+
+        elif step == 'remap':
+            make_remap(grid_file)
 
         else:
             print(f"Unknown step: {step}")
             print("Available: grid, ic_mercator, ic_cmems, bry_cmems, "
-                  "ic_roms2roms, bry_roms2roms, forcing_era5")
+                  "ic_roms2roms, bry_roms2roms, forcing_era5, tide, "
+                  "river, remap")
 
 
 if __name__ == '__main__':

@@ -67,9 +67,18 @@ ROMS 历史文件应包含以下变量：`temp`, `salt`, `zeta`, `u`, `v`, `angl
 - **自动时间参考检测**：`time_ref` 参数自动从源文件的时间变量单位属性读取，无需手动设置
 - **日期选择 IC**：通过 `init_date` 参数指定制作哪一天的 IC，自动查找匹配的时间步
 - **目录自动搜索**：支持指定目录路径，自动搜索匹配的 `.nc` 文件
+
+包目录结构：
+
+```
+roms_prepro/
+├── grid/          # 网格生成
+├── ic/            # 初始场
+├── bc/            # 边界场
+├── forcing/       # ERA5 大气强迫
+├── tide/          # 潮汐强迫
 ├── river/         # 河流输入
-├── remapping/     # sigma↔z 坐标转换
-└── utils/         # 工具函数
+└── remapping/     # sigma↔z 坐标转换
 ```
 
 ## 快速开始
@@ -168,24 +177,6 @@ cmems_to_roms_ini(
 )
 ```
 
-```python
-from roms_prepro.ic import cmems_to_roms_ini
-
-cmems_to_roms_ini(
-    roms_grid_file='my_grid.nc',
-    ini_file='my_ini_cmems.nc',
-    zeta_file='zos_20250101.nc',
-    temp_file='thetao_20250101.nc',
-    salt_file='so_20250101.nc',
-    u_file='uo_20250101.nc',
-    v_file='vo_20250101.nc',
-    Vtransform=2, Vstretching=3,
-    theta_s=2.5, theta_b=1.0, Tcline=25.0, N=30,
-    time_ref='1990-01-01',
-    init_date='2025-05-01',
-    time_index=0,
-)
-
 #### 方式三：从其他 ROMS 运行创建
 
 支持指定单个文件或目录自动搜索：
@@ -276,26 +267,23 @@ roms_to_roms_bry(
 ### 4. 大气强迫 (ERA5)
 
 ```python
-from roms_prepro.forcing import era5_to_roms_forcing
+from roms_prepro.forcing import ERA5toROMS
 
-era5_to_roms_forcing(
-    roms_grid_file=None,  # None = 保持 ERA5 原始网格
-    era5_files=era5_files,
-    rh_files=rh_files,
-    out_file='my_forc_era5.nc',
-    start_date='2024-12-27',
-    end_date='2025-02-20 23:00:00',
-    time_ref='seconds since 2000-01-01 00:00:00',
-    get_lwrad=True,
-    get_swrad=True,
-    get_rain=True,
-    get_Tair=True,
-    get_Pair=True,
-    get_Qair=True,
-    get_Wind=True,
-    interp_to_grid=False,
+conv = ERA5toROMS(
+    in_dir='/path/to/era5/',        # ERA5 GRIB/NC 文件目录
+    out_dir='./forcing_output',
+    time_start='2024-12-27 00:00:00',
+    time_end='2025-02-20 23:00:00',
+    base_date='1990-01-01 00:00:00',  # ROMS 时间基准
+    grid_file=None,                 # None = 保持 ERA5 原始网格
+    variables=['u10', 'v10', 't2m', 'd2m', 'msl', 'tp',
+               'msdrswrf', 'msdwlwrf'],
+    rotate_wind=False,
 )
+conv.process()
 ```
+
+配置模板见 `roms_prepro/forcing/d_era2roms.py`。
 
 ### 5. 潮汐强迫 (TPXO8)
 
@@ -303,22 +291,27 @@ era5_to_roms_forcing(
 from roms_prepro.tide import tpxo_to_roms_tide
 
 tpxo_to_roms_tide(
-    roms_grid_file='my_grid.nc',
+    'my_grid.nc',
+    'my_tide.nc',
+    t0='2000-01-01',           # 相位参考时间
+    ndays=365,                 # 模拟长度（nodal 因子取 t0+ndays/2）
     tpxo_dir='/path/to/tpxo/',
-    tide_file='my_tide.nc',
     constituents=['M2', 'S2', 'N2', 'K2', 'K1', 'O1', 'P1', 'Q1'],
 )
 ```
 
 ### 6. 河流输入
 
+可用 `yangtze_river()` / `huanghe_river()` 快速生成内置月气候态河流字典，
+或手工构造 `{'name', 'I', 'J', 'discharge', 'salt', 'direction'}` 字典。
+
 ```python
 from roms_prepro.river import create_river_file
 
 create_river_file(
     roms_grid_file='my_grid.nc',
-    rivers=rivers,  # 河流数据列表
-    river_file='my_river.nc',
+    out_file='my_river.nc',
+    rivers=rivers,  # 河流数据列表（I/J 网格索引 + discharge 等）
 )
 ```
 
