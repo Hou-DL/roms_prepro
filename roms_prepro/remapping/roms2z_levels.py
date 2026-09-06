@@ -7,9 +7,17 @@ from sigma coordinates to fixed z-levels.
 Standard depth levels (default):
     0, 5, 10, 15, ..., 100, 125, 150, ..., 500, 550, ..., 5000, 5500 m
 
-Usage (Python):
+Usage (Python) — one-click with auto-detected vertical parameters:
     from roms_prepro.remapping import process_file
     process_file('ocean_avg_0003.nc', 'output.nc')
+
+One-click with explicit variables, depths and vertical overrides:
+    process_file('ocean_avg_0003.nc', 'output_z.nc',
+                 variables=['temp', 'salt'],
+                 std_depths=[0, 10, 25, 50, 100, 200, 500, 1000],
+                 vgrid_params={'Vtransform': 2, 'Vstretching': 4,
+                               'theta_s': 7.0, 'theta_b': 0.1,
+                               'Tcline': 20.0, 'N': 30})
 
 Usage (CLI):
     python -m roms_prepro.remapping.roms2z_levels -i ocean_avg_0003.nc -o output.nc
@@ -146,20 +154,36 @@ def roms_to_z_levels(var_data, z_sigma, std_depths, valid_mask):
     return var_out
 
 
-def process_file(input_file, output_file=None, std_depths=None, suffix='_z'):
+def process_file(input_file, output_file=None, std_depths=None, suffix='_z',
+                 variables=None, vgrid_params=None):
     """
-    Process a single ROMS NetCDF file: interpolate to standard z-levels.
+    One-click conversion of a ROMS file from sigma to standard z-levels.
+
+    Reads the vertical coordinate parameters from the input file
+    (Vtransform/Vstretching/theta_s/theta_b/hc/N); every one of them can be
+    overridden via ``vgrid_params``.
 
     Parameters
     ----------
     input_file : str
-        Input ROMS file path.
+        Input ROMS file path (IC/BC/history/average — anything with h,
+        optionally zeta and s_rho variables).
     output_file : str, optional
         Output file path. If None, adds suffix to input filename.
     std_depths : array-like, optional
-        Custom standard depth levels. Uses DEFAULT_STD_DEPTHS if None.
+        Target depth levels, positive meters downward (sign is normalized).
+        Uses DEFAULT_STD_DEPTHS if None.  Levels deeper than the maximum
+        bathymetry are dropped automatically.
     suffix : str
         Output filename suffix when output_file is not specified.
+    variables : list of str, optional
+        Variables to interpolate, e.g. ['temp', 'salt', 'u', 'v'].
+        None = auto-detect among temp/salt/u/v/AKv/AKs/AKt.
+    vgrid_params : dict, optional
+        Vertical coordinate overrides, e.g.
+        {'Vtransform': 2, 'Vstretching': 4, 'theta_s': 7.0, 'theta_b': 0.1,
+         'Tcline': 20.0, 'N': 30}.  Keys set to None (or absent) keep the
+        values auto-detected from the input file.
 
     Returns
     -------
@@ -168,7 +192,9 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z'):
     """
     import netCDF4 as nc4
 
-    if std_depths is None:
+    if std_depths is not None:
+        std_depths = [abs(float(d)) for d in std_depths]
+    else:
         std_depths = DEFAULT_STD_DEPTHS
 
     if output_file is None:
@@ -181,8 +207,17 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z'):
     try:
         ds = nc4.Dataset(input_file, 'r')
 
-        # Parse vertical parameters
+        # Parse vertical parameters (file values + caller overrides)
         Vtransform, Vstretching, theta_s, theta_b, hc, N = _parse_vertical_params(ds)
+        if vgrid_params:
+            overrides = {k: v for k, v in vgrid_params.items() if v is not None}
+            Vtransform = int(overrides.get('Vtransform', Vtransform))
+            Vstretching = int(overrides.get('Vstretching', Vstretching))
+            theta_s = float(overrides.get('theta_s', theta_s))
+            theta_b = float(overrides.get('theta_b', theta_b))
+            hc = float(overrides.get('Tcline', overrides.get('hc', hc)))
+            N = int(overrides.get('N', N))
+            print(f"    vgrid overrides: {overrides}")
 
         # Read bathymetry and SSH
         h = ds.variables['h'][:]
@@ -263,8 +298,19 @@ def process_file(input_file, output_file=None, std_depths=None, suffix='_z'):
                 for attr in src_v.ncattrs():
                     setattr(v_out, attr, getattr(src_v, attr))
 
-        # Variables to interpolate
-        var_list = ['temp', 'salt', 'u', 'v', 'AKv', 'AKs', 'AKt']
+        # Variables to interpolate: caller-selected or auto-detected
+        if variables is None:
+            var_list = ['temp', 'salt', 'u', 'v', 'AKv', 'AKs', 'AKt']
+        else:
+            var_list = list(dict.fromkeys(variables))  # de-dup, keep order
+        missing = [v for v in var_list if v not in ds.variables]
+        if missing:
+            print(f"    WARNING: variables not in input file, skipped: {missing}")
+        var_list = [v for v in var_list if v in ds.variables]
+        if not var_list:
+            print("    ERROR: none of the requested variables exist in the input file")
+            ds.close()
+            return None
 
         for var_name in var_list:
             if var_name not in ds.variables:
@@ -376,6 +422,8 @@ def main():
                         help='Output filename suffix (default: _z)')
     parser.add_argument('--depths', nargs='+', type=float,
                         help='Custom standard depth levels (meters, positive)')
+    parser.add_argument('--vars', nargs='+',
+                        help='Variables to interpolate (default: auto-detect temp/salt/u/v/AK*)')
     parser.add_argument('-j', '--workers', type=int, default=1,
                         help='Number of parallel workers (default: 1)')
 
@@ -403,15 +451,16 @@ def main():
     print(f"  Depth levels: {len(std_depths)} ({std_depths[0]}-{std_depths[-1]}m)")
 
     if args.output and len(input_files) == 1:
-        process_file(input_files[0], args.output, std_depths)
+        process_file(input_files[0], args.output, std_depths, variables=args.vars)
     elif len(input_files) == 1:
-        process_file(input_files[0], std_depths=std_depths, suffix=args.suffix)
+        process_file(input_files[0], std_depths=std_depths, suffix=args.suffix,
+                     variables=args.vars)
     else:
         os.makedirs(args.output_dir, exist_ok=True)
         for f in input_files:
             base = os.path.splitext(os.path.basename(f))[0]
             out = os.path.join(args.output_dir, f"{base}{args.suffix}.nc")
-            process_file(f, out, std_depths)
+            process_file(f, out, std_depths, variables=args.vars)
         print(f"\nDone! {len(input_files)} files processed.")
 
     return 0

@@ -317,6 +317,8 @@ create_river_file(
 
 ### 7. sigma → z 坐标转换
 
+单变量（内存中的数组）：
+
 ```python
 from roms_prepro.remapping import sigma_to_z_levels
 import numpy as np
@@ -326,6 +328,29 @@ var_z = sigma_to_z_levels(
     var_sigma, 'my_grid.nc', z_levels,
     Vtransform=2, Vstretching=4, N=30
 )
+```
+
+整文件一键转换（垂直参数自动从文件读取，可覆盖；深度自动过滤超过最大水深的层）：
+
+```python
+from roms_prepro.remapping import process_file
+
+process_file('ocean_his_0001.nc', 'ocean_his_0001_z.nc')   # 全部默认
+
+process_file(                          # 指定变量 / 深度 / 垂直参数
+    'ocean_his_0001.nc', 'out_z.nc',
+    variables=['temp', 'salt'],
+    std_depths=[0, 10, 25, 50, 100, 200, 500, 1000],
+    vgrid_params={'Vtransform': 2, 'Vstretching': 4,
+                  'theta_s': 7.0, 'theta_b': 0.1, 'Tcline': 20.0, 'N': 30},
+)
+```
+
+CLI 批处理：
+
+```bash
+python -m roms_prepro.remapping.roms2z_levels -i 'ocean_avg_*.nc' -d ./z_out/ \
+    --depths 0 10 50 100 500 --vars temp salt
 ```
 
 ## 使用 main.py

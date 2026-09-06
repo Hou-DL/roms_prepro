@@ -81,9 +81,13 @@ CUSTOM_DEPTHS = [
 # 3. 处理选项 / Processing Options
 # ===================================================================
 
-# 变量列表 (自动检测输入文件中存在的变量)
-# 可插值变量: temp, salt, u, v, AKv, AKs, AKt
-# Variables are auto-detected; only variables present in input get interpolated
+# 要插值的变量: None = 自动检测 (temp/salt/u/v/AKv/AKs/AKt 中存在的)
+# 或显式指定，如 ['temp', 'salt']
+VARIABLES = None
+
+# 垂直坐标参数覆盖: None = 自动从输入文件读取
+# 只需给出要覆盖的键，如 {'N': 32, 'theta_s': 5.0}
+VGRID_PARAMS = None
 
 # 垂直参数 (自动从输入文件读取)
 # Vtransform, Vstretching, theta_s, theta_b, N are auto-detected from input file
@@ -115,6 +119,8 @@ if __name__ == '__main__':
         output_file=OUTPUT_FILE,
         std_depths=std_depths,
         suffix=SUFFIX,
+        variables=VARIABLES,
+        vgrid_params=VGRID_PARAMS,
     )
 
     if result:
